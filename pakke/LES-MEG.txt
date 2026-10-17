@@ -1,0 +1,32 @@
+KLUBBLISTEN STUDIO SUITE – prøveversjon (lydkort-test)
+=====================================================
+
+Dette er ikke selve appen ennå, men et lite testprogram som kjøres i Terminal.
+Det sjekker at suiten får lyd ut og inn av lydkortene dine.
+
+KOM I GANG PÅ MAC
+1. Pakk ut zip-fila (dobbeltklikk). Du får mappen «Studio-Suite-Mac».
+2. Åpne Terminal (Cmd + mellomrom, skriv «Terminal», Enter).
+3. Skriv «cd », dra mappen inn i Terminal-vinduet, og trykk Enter.
+4. Kjør denne én gang (gjør at macOS stoler på programmet):
+     xattr -dr com.apple.quarantine .
+
+PRØV DETTE
+  ./studio enheter
+      Viser alle lydkortene. Se at SPL og Focusrite står der.
+
+  ./studio testtone --ut spl
+      1 kHz-tone på −18 dBFS, så «venstre» og «høyre» hver for seg.
+      Skru ned volumet på SPL-en før du starter!
+
+  ./studio spill sang.wav --ut spl
+      Spiller en WAV-fil gjennom mikseren. Dra fila inn i Terminal for å få navnet.
+
+  ./studio mikrofon --inn focusrite --ut spl
+      Mikrofonen på inngang 1 på Focusrite rett i hodetelefonene.
+      Skriv m + Enter for å mute. macOS spør om Terminal får bruke mikrofonen: svar Ja.
+
+  ./systemsjekk
+      Kjører linjesjekken og lager lyttefiler i mappen «utdata».
+
+Enter stopper lyden. Lukk Terminal når du er ferdig.

@@ -1,0 +1,12 @@
+[package]
+name = "lydkort"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+kjerne = { path = "../kjerne" }
+cpal.workspace = true
+ringbuf.workspace = true
+rubato.workspace = true
+hound.workspace = true
+serde.workspace = true

@@ -11,6 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo test --release
 
   mac:
@@ -22,16 +23,20 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - run: |
-          cargo build --release -p systemsjekk --target aarch64-apple-darwin
-          cargo build --release -p systemsjekk --target x86_64-apple-darwin
-          mkdir -p ut
-          lipo -create -output ut/systemsjekk \
-            target/aarch64-apple-darwin/release/systemsjekk \
-            target/x86_64-apple-darwin/release/systemsjekk
+          cargo build --release -p studio -p systemsjekk --target aarch64-apple-darwin
+          cargo build --release -p studio -p systemsjekk --target x86_64-apple-darwin
+          mkdir -p Studio-Suite-Mac
+          for b in studio systemsjekk; do
+            lipo -create -output Studio-Suite-Mac/$b \
+              target/aarch64-apple-darwin/release/$b \
+              target/x86_64-apple-darwin/release/$b
+          done
+          cp pakke/LES-MEG.txt Studio-Suite-Mac/
+          zip -r Studio-Suite-Mac.zip Studio-Suite-Mac
       - uses: actions/upload-artifact@v4
         with:
           name: Studio-Suite-Mac
-          path: ut/
+          path: Studio-Suite-Mac.zip
 
   windows:
     needs: test
@@ -39,8 +44,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release -p systemsjekk
+      - run: cargo build --release -p studio -p systemsjekk
+      - shell: bash
+        run: |
+          mkdir -p Studio-Suite-Windows
+          cp target/release/studio.exe target/release/systemsjekk.exe pakke/LES-MEG.txt Studio-Suite-Windows/
       - uses: actions/upload-artifact@v4
         with:
           name: Studio-Suite-Windows
-          path: target/release/systemsjekk.exe
+          path: Studio-Suite-Windows/
