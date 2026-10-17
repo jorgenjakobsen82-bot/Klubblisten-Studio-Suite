@@ -83,6 +83,12 @@ pub struct Status {
     pub utgang_navn: String,
     pub inngang_navn: Option<String>,
     pub buffer_ms: f32,
+    /// Hvor mange ganger utgangen har bedt om lyd (skal øke hele tiden).
+    pub runder_ut: u64,
+    /// Hvor mange ganger inngangen har levert lyd (skal øke hele tiden).
+    pub runder_inn: u64,
+    /// Siste feilmelding fra lydsystemet.
+    pub feil: Option<String>,
 }
 
 struct Spiller {
@@ -190,6 +196,7 @@ impl Lydstrom {
             ..Default::default()
         }));
 
+        let inn_runder = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let inn_strom = match (&oppsett.inngang, oppsett.innganger.is_empty()) {
             (Some(navn), false) => {
                 let enhet = finn(Some(navn), true)?;
@@ -199,8 +206,15 @@ impl Lydstrom {
                 let valg = oppsett.innganger.clone();
                 let mut ramme = vec![0.0f32; inn_info];
                 let strom_cfg = strom_konfig(&cfg, oppsett.buffer);
-                let feil = |e| eprintln!("Feil på inngangen: {e}");
+                let st_feil = status.clone();
+                let feil = move |e: cpal::StreamError| {
+                    if let Ok(mut s) = st_feil.lock() {
+                        s.feil = Some(format!("Inngangen: {e}"));
+                    }
+                };
+                let inn_teller = inn_runder.clone();
                 let mut skriv = move |data: &[f32]| {
+                    inn_teller.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     for frame in data.chunks(kanaler) {
                         for (i, v) in valg.iter().enumerate() {
                             let a = frame.get(v.forste - 1).copied().unwrap_or(0.0);
@@ -252,9 +266,16 @@ impl Lydstrom {
             mellom: Vec::new(),
             opptak: Vec::new(),
             flett: Vec::new(),
+            runder_ut: 0,
+            runder_inn: inn_runder.clone(),
         };
         let strom_cfg = strom_konfig(&ut_cfg, oppsett.buffer);
-        let feil = |e| eprintln!("Feil på utgangen: {e}");
+        let st_feil = status.clone();
+        let feil = move |e: cpal::StreamError| {
+            if let Ok(mut s) = st_feil.lock() {
+                s.feil = Some(format!("Utgangen: {e}"));
+            }
+        };
         let ut_strom = match ut_cfg.sample_format() {
             cpal::SampleFormat::F32 => bygg_utgang::<f32>(&ut_enhet, &strom_cfg, lyd, feil),
             cpal::SampleFormat::I16 => bygg_utgang::<i16>(&ut_enhet, &strom_cfg, lyd, feil),
@@ -266,10 +287,15 @@ impl Lydstrom {
         }
         .map_err(|e| Lydfeil::Lydsystem(e.to_string()))?;
 
-        if let Some(s) = &inn_strom {
-            s.play().map_err(|e| Lydfeil::Lydsystem(e.to_string()))?;
-        }
+        // Utgangen først: den driver motoren, og skal gå selv om inngangen sperres.
         ut_strom.play().map_err(|e| Lydfeil::Lydsystem(e.to_string()))?;
+        if let Some(s) = &inn_strom {
+            if let Err(e) = s.play() {
+                if let Ok(mut st) = status.lock() {
+                    st.feil = Some(format!("Inngangen kunne ikke starte: {e}"));
+                }
+            }
+        }
         Ok(Lydstrom { _ut: ut_strom, _inn: inn_strom, kommandoer: tx, status })
     }
 }
@@ -332,6 +358,8 @@ struct Lydtraad {
     mellom: Vec<f32>,
     opptak: Vec<(u64, crate::opptak::Buss, ringbuf::HeapProd<f32>, Arc<std::sync::atomic::AtomicU64>)>,
     flett: Vec<f32>,
+    runder_ut: u64,
+    runder_inn: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Lydtraad {
@@ -370,6 +398,7 @@ impl Lydtraad {
 
     /// Lager én runde med lyd (`n` samples) og returnerer valgt buss.
     fn lag(&mut self, n: usize) -> Blokk {
+        self.runder_ut += 1;
         self.kommandoer();
         let mut inn: HashMap<String, Blokk> = HashMap::new();
 
@@ -484,6 +513,8 @@ impl Lydtraad {
             });
             st.maalere = Some(n);
             st.on_air = self.motor.er_on_air();
+            st.runder_ut = self.runder_ut;
+            st.runder_inn = self.runder_inn.load(std::sync::atomic::Ordering::Relaxed);
             st.inngang_tom = self.tom;
             st.klokkejustering = self.justert;
             st.spillere = self
@@ -560,6 +591,8 @@ mod tester {
             mellom: Vec::new(),
             opptak: Vec::new(),
             flett: Vec::new(),
+            runder_ut: 0,
+            runder_inn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         (t, p, tx)
     }

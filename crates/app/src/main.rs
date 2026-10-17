@@ -220,6 +220,9 @@ struct Tilstandsrapport {
     spillere: std::collections::HashMap<String, (f32, f32, bool)>,
     inngang_tom: u64,
     opptak: Vec<(String, f64, String)>,
+    runder_ut: u64,
+    runder_inn: u64,
+    feil: Option<String>,
 }
 
 fn endelig(x: f32) -> Option<f32> {
@@ -246,6 +249,9 @@ fn status_naa(tilstand: &State<'_, AppTilstand>) -> Tilstandsrapport {
             spillere: Default::default(),
             inngang_tom: 0,
             opptak: vec![],
+            runder_ut: 0,
+            runder_inn: 0,
+            feil: None,
         };
     };
     let st = k.styring.hent_topp();
@@ -261,6 +267,9 @@ fn status_naa(tilstand: &State<'_, AppTilstand>) -> Tilstandsrapport {
         spillere: st.spillere,
         inngang_tom: st.inngang_tom,
         opptak: opptak.iter().map(|o| (o.buss.navn().to_string(), o.sekunder(), o.sti.display().to_string())).collect(),
+        runder_ut: st.runder_ut,
+        runder_inn: st.runder_inn,
+        feil: st.feil,
     }
 }
 

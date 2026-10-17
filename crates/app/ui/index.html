@@ -439,6 +439,7 @@ function nullstillSpillere() {
 
 // ---------- Opptak ----------
 let opptakGaar = false;
+const helse = { ut: -1, inn: -1, utTid: Date.now(), innTid: Date.now() };
 async function opptakKnapp() {
   try {
     if (!opptakGaar) { await kall("start_opptak"); melding("Opptaket går.", "ok"); }
@@ -483,8 +484,18 @@ async function oppdater() {
     $("rec").classList.toggle("paa", opptakGaar);
     $("rec-tekst").textContent = opptakGaar ? "Opptak" : "Start opptak";
     $("rec-tid").textContent = opptakGaar ? tidLang(s.opptak[0][1]) : "";
-    $("helse").textContent = !s.kjorer ? "Klar" : s.inngang_tom > 0 ? `Lyden har hakket ${s.inngang_tom} gang${s.inngang_tom === 1 ? "" : "er"} – prøv større buffer` : "Alt i orden";
-    $("helse-prikk").style.background = !s.kjorer ? "var(--svak)" : s.inngang_tom > 0 ? "var(--rav)" : "var(--gronn)";
+    // Helsesjekk: går lydkortene faktisk?
+    const naa = Date.now();
+    if (s.runder_ut !== helse.ut) { helse.ut = s.runder_ut; helse.utTid = naa; }
+    if (s.runder_inn !== helse.inn) { helse.inn = s.runder_inn; helse.innTid = naa; }
+    let tekst = "Alt i orden", farge = "var(--gronn)";
+    if (!s.kjorer) { tekst = "Klar"; farge = "var(--svak)"; helse.utTid = helse.innTid = naa; }
+    else if (s.feil) { tekst = "Feil fra lydsystemet: " + s.feil; farge = "var(--rod2)"; }
+    else if (naa - helse.utTid > 1500) { tekst = `Utgangen (${s.utgang}) ber ikke om lyd – lydmotoren står stille. Prøv en annen utgang, eller «Maskinens standard utgang».`; farge = "var(--rod2)"; }
+    else if (s.inngang && naa - helse.innTid > 1500) { tekst = `Inngangen (${s.inngang}) gir ingen lyd. Har appen lov til å bruke mikrofonen? Systeminnstillinger → Personvern og sikkerhet → Mikrofon.`; farge = "var(--rav)"; }
+    else if (s.inngang_tom > 0) { tekst = `Lyden har hakket ${s.inngang_tom} gang${s.inngang_tom === 1 ? "" : "er"}`; farge = "var(--rav)"; }
+    $("helse").textContent = tekst + (s.kjorer ? `  ·  ut ${s.runder_ut} · inn ${s.runder_inn}` : "");
+    $("helse-prikk").style.background = farge;
   }
   setTimeout(oppdater, 50);
 }
@@ -536,7 +547,7 @@ const Demo = (() => {
     start_opptak: () => { rec = Date.now(); return []; },
     stopp_opptak: () => { const s = (Date.now() - rec) / 1000; rec = null; return { filer: ["2026-10-17 223000 Program.wav", "2026-10-17 223000 DJ-ren.wav"], sekunder: s, tapt: 0, mappe: "Musikk/Klubblisten opptak" }; },
     status: () => ({
-      kjorer: paa, utgang: "SPL Phonitor", inngang: "Scarlett 2i2 USB", buffer_ms: 2.7, on_air: paa, inngang_tom: 0,
+      kjorer: paa, utgang: "SPL Phonitor", inngang: "Scarlett 2i2 USB", buffer_ms: 2.7, on_air: paa, inngang_tom: 0, runder_ut: Date.now() >> 4, runder_inn: Date.now() >> 4, feil: null,
       kanaler: paa ? [["mik1", -14 - r() * 8, -14 - r() * 8], ["inn2", null, null], ["spillerA", -9 - r() * 4, -10 - r() * 4], ["jingler", null, null]] : [],
       master: paa ? [-7 - r() * 3, -8 - r() * 3] : [null, null],
       spillere: Object.fromEntries(Object.entries(sp).map(([k, v]) => [k, [v.spill ? ((Date.now() - v.t) / 1000) % v.len : 63, v.len, v.spill]])),
