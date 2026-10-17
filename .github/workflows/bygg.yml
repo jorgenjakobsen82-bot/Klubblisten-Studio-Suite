@@ -1,0 +1,46 @@
+name: Bygg for Mac og Windows
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --release
+
+  mac:
+    needs: test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: |
+          cargo build --release -p systemsjekk --target aarch64-apple-darwin
+          cargo build --release -p systemsjekk --target x86_64-apple-darwin
+          mkdir -p ut
+          lipo -create -output ut/systemsjekk \
+            target/aarch64-apple-darwin/release/systemsjekk \
+            target/x86_64-apple-darwin/release/systemsjekk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Studio-Suite-Mac
+          path: ut/
+
+  windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p systemsjekk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Studio-Suite-Windows
+          path: target/release/systemsjekk.exe
