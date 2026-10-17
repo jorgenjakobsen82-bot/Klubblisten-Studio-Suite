@@ -459,31 +459,31 @@ async function oppdater() {
   if (s) {
     $("onair").classList.toggle("paa", !!s.on_air);
     $("klokke").classList.toggle("av", !s.on_air);
-    $("klokke-status").textContent = s.on_air ? "ON AIR" : "OFF AIR";
+    settTekst($("klokke-status"), s.on_air ? "ON AIR" : "OFF AIR");
     const p = $("lydkort-prikk");
     if (s.kjorer) {
       p.style.background = s.inngang_tom > 0 ? "var(--rav)" : "var(--gronn)";
-      $("lydkort-tekst").textContent = s.utgang + (s.inngang ? " · " + s.inngang : "");
-      $("lyd-detaljer").textContent = `buffer ${s.buffer_ms.toFixed(1).replace(".", ",")} ms`;
-    } else { p.style.background = "var(--svak)"; $("lydkort-tekst").textContent = "Lydkort ikke startet"; $("lyd-detaljer").textContent = ""; }
+      settTekst($("lydkort-tekst"), s.utgang + (s.inngang ? " · " + s.inngang : ""));
+      settTekst($("lyd-detaljer"), `buffer ${s.buffer_ms.toFixed(1).replace(".", ",")} ms`);
+    } else { p.style.background = "var(--svak)"; settTekst($("lydkort-tekst"), "Lydkort ikke startet"); settTekst($("lyd-detaljer"), ""); }
     for (const [id, v, h] of s.kanaler) if (striper[id]) settMaaler(striper[id].maaler, v, h);
     if (masterMaaler) {
       settMaaler(masterMaaler, s.master[0], s.master[1]);
-      const mt = $("master-topp"); if (mt) { const t = Math.max(masterMaaler.holdt[0], masterMaaler.holdt[1]); mt.textContent = t <= -89 ? "−∞" : (t < 0 ? "−" : "") + Math.abs(t).toFixed(1); mt.style.color = t > -1 ? "var(--rod2)" : "var(--tekst)"; }
+      const mt = $("master-topp"); if (mt) { const t = Math.max(masterMaaler.holdt[0], masterMaaler.holdt[1]); settTekst(mt, t <= -89 ? "−∞" : (t < 0 ? "−" : "") + Math.abs(t).toFixed(1)); mt.style.color = t > -1 ? "var(--rod2)" : "var(--tekst)"; }
     }
     for (const id in spillerEl) {
       const e = spillerEl[id], sp = s.spillere[id];
       if (!sp || !e.lastet) continue;
       const [pos, len, spiller] = sp;
       e.spiller = spiller; e.d.classList.toggle("spiller-paa", spiller);
-      e.spill.textContent = spiller ? "■ Stopp" : "▶ Spill";
+      settTekst(e.spill, spiller ? "■ Stopp" : "▶ Spill");
       e.bar.style.width = (len ? pos / len * 100 : 0) + "%";
-      e.tid.textContent = tid(pos) + " / " + tid(len);
+      settTekst(e.tid, tid(pos) + " / " + tid(len));
     }
     opptakGaar = s.opptak.length > 0;
     $("rec").classList.toggle("paa", opptakGaar);
-    $("rec-tekst").textContent = opptakGaar ? "Opptak" : "Start opptak";
-    $("rec-tid").textContent = opptakGaar ? tidLang(s.opptak[0][1]) : "";
+    settTekst($("rec-tekst"), opptakGaar ? "Opptak" : "Start opptak");
+    settTekst($("rec-tid"), opptakGaar ? tidLang(s.opptak[0][1]) : "");
     // Helsesjekk: går lydkortene faktisk?
     const naa = Date.now();
     if (s.runder_ut !== helse.ut) { helse.ut = s.runder_ut; helse.utTid = naa; }
@@ -494,7 +494,7 @@ async function oppdater() {
     else if (naa - helse.utTid > 1500) { tekst = `Utgangen (${s.utgang}) ber ikke om lyd – lydmotoren står stille. Prøv en annen utgang, eller «Maskinens standard utgang».`; farge = "var(--rod2)"; }
     else if (s.inngang && naa - helse.innTid > 1500) { tekst = `Inngangen (${s.inngang}) gir ingen lyd. Har appen lov til å bruke mikrofonen? Systeminnstillinger → Personvern og sikkerhet → Mikrofon.`; farge = "var(--rav)"; }
     else if (s.inngang_tom > 0) { tekst = `Lyden har hakket ${s.inngang_tom} gang${s.inngang_tom === 1 ? "" : "er"}`; farge = "var(--rav)"; }
-    $("helse").textContent = tekst + (s.kjorer ? `  ·  ut ${s.runder_ut} · inn ${s.runder_inn}` : "");
+    settTekst($("helse"), tekst + (s.kjorer ? `  ·  ut ${s.runder_ut} · inn ${s.runder_inn}` : ""));
     $("helse-prikk").style.background = farge;
   }
   setTimeout(oppdater, 50);
@@ -521,6 +521,8 @@ function tikk() {
   setTimeout(tikk, 1000 - n.getMilliseconds() + 5);
 }
 
+// Skriv bare om teksten når den faktisk endres – ellers kan Mac-en miste klikk på knappen.
+function settTekst(el, t) { if (el && el.textContent !== t) el.textContent = t; }
 function visFeil(e) { melding(String(e && e.message ? e.message : e), "feil"); }
 
 // ---------- Demo i nettleser (bare for å se på designet) ----------
