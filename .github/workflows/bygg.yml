@@ -67,3 +67,25 @@ jobs:
         with:
           name: Studio-Suite-Windows
           path: Studio-Suite-Windows/
+
+  publiser:
+    needs: [mac, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: filer
+      - name: Legg ut som «Nyeste versjon» under Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cp "filer/Studio-Suite-Mac/Klubblisten Studio.dmg" Klubblisten-Studio-Mac.dmg
+          cp "filer/Studio-Suite-Windows/Klubblisten Studio installer.exe" Klubblisten-Studio-Windows.exe
+          gh release delete nyeste --yes --cleanup-tag || true
+          gh release create nyeste --target "$GITHUB_SHA" --latest \
+            --title "Nyeste versjon ($(date +%d.%m.%Y))" \
+            --notes "Last ned Klubblisten-Studio-Mac.dmg for Mac, eller Klubblisten-Studio-Windows.exe for Windows. Bygget automatisk fra siste endring." \
+            Klubblisten-Studio-Mac.dmg Klubblisten-Studio-Windows.exe
