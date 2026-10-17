@@ -1,3 +1,4 @@
 /target
 /utdata
 *.wav
+/crates/app/gen

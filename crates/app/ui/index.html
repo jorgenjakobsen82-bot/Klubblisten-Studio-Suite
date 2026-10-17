@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="nb">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Klubblisten Studio Suite</title>
+<style>
+@font-face{font-family:Anton;src:url(fonter/anton-latin-400-normal.woff2) format("woff2");font-weight:400}
+@font-face{font-family:Inter;src:url(fonter/inter-latin-400-normal.woff2) format("woff2");font-weight:400}
+@font-face{font-family:Inter;src:url(fonter/inter-latin-500-normal.woff2) format("woff2");font-weight:500}
+@font-face{font-family:Inter;src:url(fonter/inter-latin-600-normal.woff2) format("woff2");font-weight:600}
+@font-face{font-family:"JetBrains Mono";src:url(fonter/jetbrains-mono-latin-500-normal.woff2) format("woff2");font-weight:500}
+:root{
+  --bg:#0a0a0c;--flate:#121214;--flate2:#18181b;--linje:#27272a;--linje2:#3f3f46;--linje3:#52525b;
+  --tekst:#f4f4f5;--dempet:#a1a1aa;--svak:#71717a;--gul:#ffe608;--rod:#dc2626;--rod2:#ef4444;--rodlys:#fca5a5;
+  --gronn:#22c55e;--rav:#f59e0b;--seg-av:#1f1f23;--mono:"JetBrains Mono",ui-monospace,monospace;
+}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--tekst);font:14px/1.4 Inter,system-ui,sans-serif;font-variant-numeric:tabular-nums}
+body{display:flex;flex-direction:column;min-height:100vh;user-select:none;-webkit-user-select:none}
+button,select{font:inherit;color:inherit}
+button{cursor:pointer;background:transparent;border:1px solid var(--linje2);border-radius:6px;height:32px;padding:0 12px;font-size:13px}
+button:hover{border-color:var(--linje3);background:#1c1c20}
+button:focus-visible,select:focus-visible,.fader:focus-visible{outline:2px solid var(--gul);outline-offset:2px}
+button:disabled{opacity:.45;cursor:default}
+button.primar{background:var(--gul);color:#0a0a0c;border-color:var(--gul);font-weight:600}
+button.primar:hover{background:#fff27a}
+select{background:var(--flate2);border:1px solid var(--linje2);border-radius:6px;height:34px;padding:0 10px;font-size:13px;width:100%}
+.mono{font-family:var(--mono)}
+.dempet{color:var(--dempet)}
+.prikk{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
+h2{margin:0;font-size:15px;font-weight:600;letter-spacing:.3px}
+.kort{background:var(--flate);border:1px solid var(--linje);border-radius:10px;padding:16px;display:flex;flex-direction:column;gap:12px}
+.rad{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.fyll{flex:1}
+
+/* topplinje */
+header{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px;padding:10px 20px;background:var(--flate);border-bottom:1px solid var(--linje)}
+.logo{display:flex;align-items:baseline;gap:10px;padding-right:6px}
+.logo b{font:400 22px/1 Anton,Impact,sans-serif;letter-spacing:1.5px;color:#fff}
+.pille{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--linje);border-radius:6px;font-size:13px;white-space:nowrap}
+#onair{font-weight:600;letter-spacing:2px;color:var(--svak);border-color:var(--linje)}
+#onair.paa{background:var(--rod);border-color:var(--rod);color:#fff}
+#rec{gap:8px}
+#rec.paa{border-color:var(--rod);color:var(--tekst)}
+#rec .prikk{background:var(--svak)}
+#rec.paa .prikk{background:var(--rod2);animation:blink 1s steps(2) infinite}
+@keyframes blink{50%{opacity:.25}}
+
+main{display:flex;flex-wrap:wrap;align-items:flex-start;gap:16px;padding:16px 20px;flex:1}
+.venstre{flex:999 1 600px;min-width:0;display:flex;flex-direction:column;gap:16px}
+aside{flex:1 1 340px;min-width:0;display:flex;flex-direction:column;gap:16px}
+
+/* mikser */
+.stripper{display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;min-height:330px}
+.stripe{flex:0 0 108px;display:flex;flex-direction:column;gap:10px;padding:10px 8px;background:var(--flate2);border:1px solid var(--linje);border-radius:8px}
+.stripe.master{flex-basis:150px;border-color:var(--linje2);margin-left:8px}
+.stripe .navn{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stripe .hvem{font-size:11px;color:var(--dempet)}
+.merke{font-size:10px;font-weight:600;letter-spacing:.8px;color:#d4d4d8;border:1px solid var(--linje2);border-radius:4px;padding:2px 5px}
+.maaler-og-fader{display:flex;justify-content:center;gap:10px;height:190px}
+.maaler{display:flex;gap:2px}
+.maaler .kol{display:flex;flex-direction:column-reverse;gap:2px;width:7px}
+.master .maaler .kol{width:10px}
+.seg{flex:1;border-radius:1px;background:var(--seg-av)}
+.fader{position:relative;width:28px;height:190px;cursor:ns-resize;touch-action:none;border-radius:4px}
+.fader .spor{position:absolute;left:12px;top:0;bottom:0;width:4px;background:var(--linje);border-radius:2px}
+.fader .null{position:absolute;left:4px;width:20px;height:1px;background:var(--linje3)}
+.fader .knott{position:absolute;left:0;width:28px;height:22px;background:#d4d4d8;border:1px solid var(--svak);border-radius:3px;display:flex;align-items:center;padding:0 4px}
+.fader .knott::after{content:"";flex:1;height:2px;background:var(--linje2)}
+.db{font-family:var(--mono);font-size:12px;text-align:center}
+.knapper{display:flex;gap:4px}
+.knapper button{flex:1;height:30px;padding:0;border-radius:5px;font-size:10px;font-weight:600;letter-spacing:.8px;color:#d4d4d8}
+.knapper button[aria-pressed=true]{background:var(--tekst);color:var(--bg);border-color:var(--tekst)}
+.knapper button.mute[aria-pressed=true]{background:var(--rod2);border-color:var(--rod2);color:#fff}
+.busser{display:flex;gap:4px;justify-content:center}
+.busser span{width:24px;height:20px;display:flex;align-items:center;justify-content:center;border-radius:4px;font-size:10px;font-weight:600;border:1px solid var(--linje);color:var(--svak)}
+.busser span.paa{background:var(--linje);color:var(--tekst);border-color:var(--linje3)}
+.tom-mikser{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--dempet);border:1px dashed var(--linje2);border-radius:8px;padding:30px;text-align:center}
+
+/* spillere */
+.spillere{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}
+.spiller{background:var(--flate2);border:1px solid var(--linje);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:10px;transition:border-color .1s}
+.spiller.slipp{border-color:var(--gul);background:#1d1c14}
+.spiller .fil{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.fremdrift{height:6px;background:var(--linje);border-radius:3px;overflow:hidden}
+.fremdrift div{height:100%;width:0;background:#e4e4e7}
+.spiller.spiller-paa .fremdrift div{background:var(--gul)}
+button.spill-knapp{min-width:84px;font-weight:600}
+button.av-paa[aria-pressed=true]{background:var(--linje);border-color:var(--linje3)}
+
+/* klokke */
+.klokke{position:relative;width:248px;height:248px;background:var(--bg);border-radius:16px;align-self:center}
+.klokke .p{position:absolute;border-radius:50%}
+.klokke .tekst{position:absolute;left:0;right:0;text-align:center;color:var(--rod2)}
+.klokke.av .tekst{color:var(--dempet)}
+.felt{padding:10px;background:var(--flate2);border:1px solid var(--linje);border-radius:8px}
+.felt .l{font-size:11px;color:var(--dempet)}
+.felt .v{font-family:var(--mono);font-size:16px;margin-top:2px;word-break:break-all}
+label.etikett{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--dempet)}
+.hjelp{font-size:12px;color:var(--dempet);line-height:1.5}
+
+footer{display:flex;flex-wrap:wrap;align-items:center;gap:8px 20px;padding:8px 20px;background:var(--flate);border-top:1px solid var(--linje);font-size:12px;color:var(--dempet);min-height:36px}
+#melding.feil{color:#fca5a5}
+#melding.ok{color:var(--tekst)}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo"><b>KLUBBLISTEN</b><span class="dempet" style="font-size:13px">Studio Suite</span></div>
+  <div class="pille" id="onair" title="Lyser når en mikrofon er åpen">ON AIR</div>
+  <button class="pille" id="rec" type="button" disabled title="Tar opp Program og DJ-ren til hver sin fil"><span class="prikk"></span><span id="rec-tekst">Start opptak</span><span class="mono" id="rec-tid" style="color:var(--rodlys)"></span></button>
+  <div class="pille" id="lydkort-pille"><span class="prikk" id="lydkort-prikk" style="background:var(--svak)"></span><span id="lydkort-tekst">Lydkort ikke startet</span></div>
+  <div class="fyll"></div>
+  <div class="mono" style="font-size:20px" id="topp-klokke">--:--:--</div>
+</header>
+
+<main>
+  <div class="venstre">
+    <section class="kort" aria-label="Mikser">
+      <div class="rad">
+        <h2>Mikser</h2>
+        <span class="dempet" style="font-size:13px" id="mikser-info">Busser: M Master · D DJ-ren · S Studio</span>
+        <div class="fyll"></div>
+        <span class="dempet" style="font-size:12px">Dobbeltklikk på en fader for 0 dB</span>
+      </div>
+      <div class="stripper" id="stripper">
+        <div class="tom-mikser" id="tom-mikser">
+          <div style="font-size:15px;color:var(--tekst);font-weight:600">Start lyden for å se mikseren</div>
+          <div>Velg lydkort til høyre og trykk <b style="color:var(--tekst)">Start lyd</b>.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="kort" aria-label="Spillere">
+      <div class="rad"><h2>Spillere</h2><span class="dempet" style="font-size:13px">Dra en WAV-fil inn på en spiller, eller trykk «Velg fil»</span></div>
+      <div class="spillere" id="spillere"></div>
+    </section>
+  </div>
+
+  <aside>
+    <section class="kort" aria-label="Studioklokke">
+      <div class="klokke av" id="klokke">
+        <div class="tekst" id="klokke-status" style="top:70px;font-size:12px;font-weight:600;letter-spacing:3px">OFF AIR</div>
+        <div class="tekst mono" id="klokke-hm" style="top:96px;font-size:44px;line-height:1">--:--</div>
+        <div class="tekst mono" id="klokke-ss" style="top:150px;font-size:18px;opacity:.75">--</div>
+      </div>
+    </section>
+
+    <section class="kort" aria-label="Lydkort">
+      <div class="rad"><h2>Lydkort</h2><div class="fyll"></div><button type="button" id="oppdater-enheter" title="Se etter lydkort på nytt">Søk på nytt</button></div>
+      <label class="etikett">Utgang (det du hører)
+        <select id="velg-ut"></select>
+      </label>
+      <label class="etikett">Inngang (mikrofon og linje)
+        <select id="velg-inn"></select>
+      </label>
+      <label class="etikett">Hva skal ut på utgangen
+        <select id="velg-lytt">
+          <option value="hodetelefoner">Hodetelefoner – null forsinkelse, solo høres her</option>
+          <option value="hoyttalere">Høyttalere – kuttes når mikrofonen er åpen</option>
+          <option value="program">Program – slik lytterne hører det</option>
+        </select>
+      </label>
+      <div class="rad">
+        <button type="button" class="primar" id="start-lyd">Start lyd</button>
+        <button type="button" id="stopp-lyd" disabled>Stopp</button>
+        <div class="fyll"></div>
+        <span class="dempet mono" style="font-size:12px" id="lyd-detaljer"></span>
+      </div>
+      <div class="hjelp" id="lydkort-hjelp">Skru ned volumet på forsterkeren før du starter første gang.</div>
+    </section>
+
+    <section class="kort" aria-label="Opptak">
+      <div class="rad"><h2>Opptak</h2><div class="fyll"></div><button type="button" id="aapne-mappe">Åpne mappen</button></div>
+      <div class="felt"><div class="l">Siste opptak</div><div class="v" id="siste-opptak" style="font-size:12px;font-family:Inter">Ingen ennå</div></div>
+      <div class="hjelp">Tar opp <b style="color:var(--tekst)">Program</b> og <b style="color:var(--tekst)">DJ-ren</b> til hver sin WAV-fil (48 kHz, 32-bit). Filene tåler at maskinen krasjer, og blir RF64 over 4 GB.</div>
+    </section>
+  </aside>
+</main>
+
+<footer>
+  <span style="display:flex;align-items:center;gap:6px"><span class="prikk" id="helse-prikk" style="background:var(--svak)"></span><span id="helse" style="color:var(--tekst)">Klar</span></span>
+  <span id="melding"></span>
+  <div class="fyll"></div>
+  <span>48 kHz · 32-bit flyttall</span>
+</footer>
+
+<script>
+"use strict";
+// ---------- Kobling til Rust (eller demo i nettleser) ----------
+const T = window.__TAURI__;
+const demo = !T;
+async function kall(cmd, args) {
+  if (!demo) return T.core.invoke(cmd, args || {});
+  return Demo[cmd] ? Demo[cmd](args || {}) : null;
+}
+
+// ---------- Hjelpere ----------
+const $ = (id) => document.getElementById(id);
+const pad = (n) => String(n).padStart(2, "0");
+const tid = (s) => { s = Math.max(0, Math.floor(s || 0)); const h = Math.floor(s / 3600); return (h ? h + ":" + pad(Math.floor(s / 60) % 60) : Math.floor(s / 60)) + ":" + pad(s % 60); };
+const tidLang = (s) => { s = Math.max(0, Math.floor(s || 0)); return pad(Math.floor(s / 3600)) + ":" + pad(Math.floor(s / 60) % 60) + ":" + pad(s % 60); };
+const lagre = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+const hent = (k, d) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } };
+function melding(t, type) {
+  const m = $("melding"); m.textContent = t || ""; m.className = type || "";
+  clearTimeout(melding.t); if (t && type !== "feil") melding.t = setTimeout(() => { m.textContent = ""; }, 6000);
+}
+
+// Fader: posisjon 0–1. 0,75 = 0 dB, toppen = +10 dB, bunnen = −∞.
+const posTilDb = (p) => p <= 0.01 ? -200 : p >= 0.75 ? (p - 0.75) / 0.25 * 10 : (p / 0.75 - 1) * 60;
+const dbTilPos = (db) => db <= -60 ? 0 : db >= 0 ? 0.75 + Math.min(db, 10) / 10 * 0.25 : (db / 60 + 1) * 0.75;
+const dbTekst = (db) => db <= -60 ? "−∞" : (db > 0 ? "+" : db < 0 ? "−" : "") + Math.abs(db).toFixed(1) + " dB";
+
+// ---------- Målere ----------
+const SEG = 24;
+function lagMaaler(bred) {
+  const m = document.createElement("div"); m.className = "maaler";
+  const kolonner = [0, 1].map(() => {
+    const k = document.createElement("div"); k.className = "kol";
+    for (let i = 0; i < SEG; i++) { const s = document.createElement("div"); s.className = "seg"; k.appendChild(s); }
+    m.appendChild(k); return k;
+  });
+  return { el: m, kolonner, holdt: [-90, -90] };
+}
+// −60 dBFS = bunn, 0 dBFS = topp. Rødt over −3, gult over −12.
+function settMaaler(m, v, h) {
+  [v, h].forEach((db, i) => {
+    db = db == null ? -90 : db;
+    m.holdt[i] = db > m.holdt[i] ? db : Math.max(db, m.holdt[i] - 1.2);
+    const tent = Math.round((m.holdt[i] + 60) / 60 * SEG);
+    const seg = m.kolonner[i].children;
+    for (let k = 0; k < SEG; k++) {
+      const segDb = -60 + (k + 1) * 60 / SEG;
+      const farge = k < tent ? (segDb > -3 ? "var(--rod2)" : segDb > -12 ? "var(--rav)" : "var(--gronn)") : "";
+      if (seg[k]._f !== farge) { seg[k].style.background = farge; seg[k]._f = farge; }
+    }
+  });
+}
+
+// ---------- Mikser ----------
+let kanaler = [];
+const striper = {};
+let masterMaaler = null;
+
+function lagFader(start, vedEndring) {
+  const f = document.createElement("div"); f.className = "fader"; f.tabIndex = 0;
+  f.setAttribute("role", "slider"); f.setAttribute("aria-valuemin", "-60"); f.setAttribute("aria-valuemax", "10");
+  f.innerHTML = '<div class="spor"></div><div class="null"></div><div class="knott"></div>';
+  const knott = f.querySelector(".knott"), H = 190, K = 22;
+  f.querySelector(".null").style.top = Math.round((1 - 0.75) * (H - K) + K / 2) + "px";
+  let pos = dbTilPos(start);
+  const tegn = () => { knott.style.top = Math.round((1 - pos) * (H - K)) + "px"; f.setAttribute("aria-valuenow", posTilDb(pos).toFixed(1)); };
+  const sett = (p) => { pos = Math.min(1, Math.max(0, p)); tegn(); vedEndring(posTilDb(pos)); };
+  let dra = null;
+  f.addEventListener("pointerdown", (e) => {
+    f.setPointerCapture(e.pointerId);
+    const r = f.getBoundingClientRect();
+    const paaKnott = e.target === knott;
+    dra = { y: e.clientY, pos, fin: e.shiftKey };
+    if (!paaKnott) { sett(1 - (e.clientY - r.top - K / 2) / (H - K)); dra.pos = pos; }
+  });
+  f.addEventListener("pointermove", (e) => { if (dra) sett(dra.pos - (e.clientY - dra.y) / (H - K) * (e.shiftKey ? 0.2 : 1)); });
+  f.addEventListener("pointerup", () => { dra = null; });
+  f.addEventListener("dblclick", () => sett(0.75));
+  f.addEventListener("keydown", (e) => {
+    const steg = e.shiftKey ? 0.005 : 0.02;
+    if (e.key === "ArrowUp") { sett(pos + steg); e.preventDefault(); }
+    if (e.key === "ArrowDown") { sett(pos - steg); e.preventDefault(); }
+  });
+  f.addEventListener("wheel", (e) => { e.preventDefault(); sett(pos - Math.sign(e.deltaY) * 0.01); }, { passive: false });
+  tegn();
+  return f;
+}
+
+function byggMikser(liste) {
+  kanaler = liste;
+  const st = $("stripper"); st.innerHTML = "";
+  for (const k in striper) delete striper[k];
+  if (!liste.length) { st.appendChild(tomMikser); return; }
+  for (const k of liste) {
+    const d = document.createElement("div"); d.className = "stripe";
+    d.innerHTML = `<div style="min-height:34px"><div class="navn"></div><div class="hvem"></div></div>
+      <div class="rad" style="gap:4px;min-height:20px"><span class="merke"></span>${k.privat ? '<span style="font-size:10px;color:#fdba74">Privat</span>' : ""}</div>`;
+    d.querySelector(".navn").textContent = k.navn;
+    d.querySelector(".hvem").textContent = k.hvem;
+    d.querySelector(".merke").textContent = k.type;
+    const mf = document.createElement("div"); mf.className = "maaler-og-fader";
+    const m = lagMaaler(); mf.appendChild(m.el);
+    const dbEl = document.createElement("div"); dbEl.className = "db"; dbEl.textContent = dbTekst(k.fader);
+    mf.appendChild(lagFader(k.fader, (db) => { dbEl.textContent = dbTekst(db); sendFader(k.id, db); }));
+    d.appendChild(mf); d.appendChild(dbEl);
+    const kn = document.createElement("div"); kn.className = "knapper";
+    for (const [navn, kl] of [["MUTE", "mute"], ["SOLO", "solo"]]) {
+      const b = document.createElement("button"); b.type = "button"; b.className = kl; b.textContent = navn; b.setAttribute("aria-pressed", "false");
+      b.title = kl === "solo" ? "Forhåndslytt: bare i hodetelefonene, aldri på sending" : "Slå av kanalen";
+      b.onclick = () => { const p = b.getAttribute("aria-pressed") !== "true"; b.setAttribute("aria-pressed", p); kall("sett", { adresse: `kanal/${k.id}/${kl}`, verdi: p }).catch(visFeil); };
+      kn.appendChild(b);
+    }
+    d.appendChild(kn);
+    const bu = document.createElement("div"); bu.className = "busser";
+    [["M", k.til_master, "Master"], ["D", k.til_dj_ren, "DJ-ren"], ["S", k.til_studio, "Studio"]].forEach(([b, paa, t]) => {
+      const s = document.createElement("span"); s.textContent = b; s.title = t + (paa ? " – på" : " – av"); if (paa) s.className = "paa"; bu.appendChild(s);
+    });
+    d.appendChild(bu);
+    st.appendChild(d);
+    striper[k.id] = { maaler: m };
+  }
+  const ms = document.createElement("div"); ms.className = "stripe master";
+  ms.innerHTML = `<div style="min-height:34px"><div class="navn" style="letter-spacing:1px">MASTER</div><div class="hvem">Program ut</div></div>`;
+  const mf = document.createElement("div"); mf.className = "maaler-og-fader";
+  masterMaaler = lagMaaler(); mf.appendChild(masterMaaler.el);
+  const mdb = document.createElement("div"); mdb.className = "db"; mdb.textContent = "0.0 dB";
+  mf.appendChild(lagFader(0, (db) => { mdb.textContent = dbTekst(db); kall("sett", { adresse: "master/fader", verdi: db }).catch(visFeil); }));
+  ms.appendChild(mf); ms.appendChild(mdb);
+  const topp = document.createElement("div"); topp.className = "rad"; topp.style.cssText = "justify-content:space-between;font-size:11px;color:var(--dempet)";
+  topp.innerHTML = '<span>Topp</span><span class="mono" style="color:var(--tekst)" id="master-topp">−∞</span>';
+  ms.appendChild(topp);
+  st.appendChild(ms);
+}
+const tomMikser = $("tom-mikser");
+
+const faderKo = {};
+function sendFader(id, db) {
+  // Send maks ~60 ganger i sekundet per kanal.
+  if (faderKo[id]) { faderKo[id].db = db; return; }
+  faderKo[id] = { db };
+  requestAnimationFrame(() => { const v = faderKo[id].db; delete faderKo[id]; kall("sett", { adresse: `kanal/${id}/fader`, verdi: v }).catch(visFeil); });
+}
+
+// ---------- Spillere ----------
+const SPILLERE = [
+  { id: "spillerA", navn: "Spiller A", hvem: "Avvikling", test: true },
+  { id: "jingler", navn: "Jingler", hvem: "Lydknapper" }
+];
+const spillerEl = {};
+function byggSpillere() {
+  const c = $("spillere"); c.innerHTML = "";
+  for (const s of SPILLERE) {
+    const d = document.createElement("div"); d.className = "spiller"; d.dataset.kanal = s.id;
+    d.innerHTML = `<div class="rad"><b style="font-size:13px">${s.navn}</b><span class="dempet" style="font-size:12px">${s.hvem}</span><div class="fyll"></div>
+        <span class="mono dempet" style="font-size:12px" data-r="tid">0:00 / 0:00</span></div>
+      <div class="fil dempet" data-r="fil">Ingen fil lastet</div>
+      <div class="fremdrift"><div data-r="bar"></div></div>
+      <div class="rad">
+        <button type="button" class="spill-knapp" data-r="spill" disabled>▶ Spill</button>
+        <button type="button" class="av-paa" data-r="lokke" aria-pressed="false" disabled title="Spill om igjen når fila er ferdig">Løkke</button>
+        <div class="fyll"></div>
+        ${s.test ? '<button type="button" data-r="test" title="1 kHz på −18 dBFS, så venstre og høyre">Testtone</button>' : ""}
+        <button type="button" data-r="velg">Velg fil…</button>
+      </div>`;
+    const r = (n) => d.querySelector(`[data-r=${n}]`);
+    const e = { d, tid: r("tid"), fil: r("fil"), bar: r("bar"), spill: r("spill"), lokke: r("lokke"), lastet: false, spiller: false };
+    e.spill.onclick = () => kall("spill", { kanal: s.id, spill: !e.spiller }).catch(visFeil);
+    e.lokke.onclick = () => { const p = e.lokke.getAttribute("aria-pressed") !== "true"; e.lokke.setAttribute("aria-pressed", p); kall("spill", { kanal: s.id, spill: e.spiller, lokke: p }).catch(visFeil); };
+    r("velg").onclick = () => velgFil(s.id);
+    if (s.test) r("test").onclick = () => kall("testtone", { kanal: s.id }).then((f) => lastet(s.id, f)).catch(visFeil);
+    spillerEl[s.id] = e;
+    c.appendChild(d);
+  }
+}
+function lastet(id, f) {
+  const e = spillerEl[id]; if (!e || !f) return;
+  e.lastet = true; e.fil.textContent = f.navn; e.fil.classList.remove("dempet");
+  e.spill.disabled = false; e.lokke.disabled = false;
+  e.tid.textContent = "0:00 / " + tid(f.sekunder);
+  melding(`Lastet «${f.navn}» i ${SPILLERE.find((s) => s.id === id).navn}`, "ok");
+}
+async function lastFil(id, sti) {
+  if (!lyd) { melding("Start lyden først, så kan du laste filer.", "feil"); return; }
+  melding("Laster " + sti.split(/[\\/]/).pop() + " …");
+  try { lastet(id, await kall("last_fil", { kanal: id, sti })); } catch (e) { visFeil(e); }
+}
+async function velgFil(id) {
+  if (!lyd) { melding("Start lyden først, så kan du laste filer.", "feil"); return; }
+  try {
+    const sti = demo ? "demo.wav" : await kall("plugin:dialog|open", { options: { multiple: false, directory: false, filters: [{ name: "Lydfiler", extensions: ["wav", "WAV"] }] } });
+    if (sti) await lastFil(id, typeof sti === "string" ? sti : sti.path);
+  } catch (e) { visFeil(e); }
+}
+// Dra og slipp filer fra Finder/Utforsker
+if (!demo && T.webview) {
+  T.webview.getCurrentWebview().onDragDropEvent((ev) => {
+    const p = ev.payload;
+    const over = (pos) => { if (!pos) return null; const s = window.devicePixelRatio || 1; const el = document.elementFromPoint(pos.x / s, pos.y / s); return el && el.closest(".spiller"); };
+    document.querySelectorAll(".spiller.slipp").forEach((e) => e.classList.remove("slipp"));
+    if (p.type === "over" || p.type === "enter") { const sp = over(p.position); if (sp) sp.classList.add("slipp"); }
+    if (p.type === "drop") { const sp = over(p.position) || document.querySelector(".spiller"); if (sp && p.paths && p.paths[0]) lastFil(sp.dataset.kanal, p.paths[0]); }
+  });
+}
+
+// ---------- Lydkort ----------
+let lyd = false;
+let enhetsliste = [];
+async function lastEnheter() {
+  try { enhetsliste = await kall("enheter"); } catch (e) { visFeil(e); enhetsliste = []; }
+  const valg = hent("lydvalg", null);
+  const ut = $("velg-ut"), inn = $("velg-inn");
+  ut.innerHTML = ""; inn.innerHTML = "";
+  const utliste = enhetsliste.filter((e) => e.ut_kanaler > 0), innliste = enhetsliste.filter((e) => e.inn_kanaler > 0);
+  const opt = (sel, e, tekst) => { const o = document.createElement("option"); o.value = e; o.textContent = tekst; sel.appendChild(o); };
+  opt(ut, "", "Maskinens standard utgang");
+  utliste.forEach((e) => opt(ut, e.navn, `${e.navn} · ${e.ut_kanaler} ut${e.stotter_48k ? "" : " · ikke 48 kHz"}`));
+  opt(inn, "", "Ingen inngang (bare avspilling)");
+  innliste.forEach((e) => opt(inn, e.navn, `${e.navn} · ${e.inn_kanaler} inn`));
+  // Forslag: SPL ut, Focusrite inn – ellers det som ble brukt sist.
+  const finn = (liste, ord) => (liste.find((e) => ord.some((o) => e.navn.toLowerCase().includes(o))) || {}).navn;
+  ut.value = (valg && utliste.some((e) => e.navn === valg.utgang) && valg.utgang) || finn(utliste, ["spl", "phonitor"]) || "";
+  inn.value = (valg && innliste.some((e) => e.navn === valg.inngang) && valg.inngang) || finn(innliste, ["focusrite", "scarlett"]) || "";
+  if (valg && valg.lytt) $("velg-lytt").value = valg.lytt;
+  $("lydkort-hjelp").textContent = enhetsliste.length
+    ? `Fant ${enhetsliste.length} lydkort. Skru ned volumet på forsterkeren før du starter første gang.`
+    : "Fant ingen lydkort. Sjekk at de er koblet til, og trykk «Søk på nytt».";
+}
+async function startLyd() {
+  const valg = { utgang: $("velg-ut").value || null, inngang: $("velg-inn").value || null, lytt: $("velg-lytt").value };
+  $("start-lyd").disabled = true; melding("Starter lyd …");
+  try {
+    const liste = await kall("start_lyd", { valg });
+    lagre("lydvalg", valg);
+    lyd = true; byggMikser(liste); nullstillSpillere();
+    $("stopp-lyd").disabled = false; $("rec").disabled = false; $("start-lyd").textContent = "Start på nytt";
+    melding(valg.inngang ? "Lyden går. Mikrofon-faderne står nede – skyv opp når du vil høre deg selv." : "Lyden går. Last en fil eller trykk Testtone.", "ok");
+  } catch (e) { visFeil(e); }
+  $("start-lyd").disabled = false;
+}
+async function stoppLyd() {
+  await kall("stopp_lyd").catch(visFeil);
+  lyd = false; byggMikser([]); nullstillSpillere();
+  $("stopp-lyd").disabled = true; $("rec").disabled = true; $("start-lyd").textContent = "Start lyd";
+  melding("Lyden er stoppet.", "ok");
+}
+function nullstillSpillere() {
+  for (const id in spillerEl) { const e = spillerEl[id]; e.lastet = false; e.fil.textContent = "Ingen fil lastet"; e.fil.classList.add("dempet"); e.spill.disabled = true; e.lokke.disabled = true; e.lokke.setAttribute("aria-pressed", "false"); e.bar.style.width = "0"; e.tid.textContent = "0:00 / 0:00"; }
+}
+
+// ---------- Opptak ----------
+let opptakGaar = false;
+async function opptakKnapp() {
+  try {
+    if (!opptakGaar) { await kall("start_opptak"); melding("Opptaket går.", "ok"); }
+    else {
+      const r = await kall("stopp_opptak");
+      const navn = r.filer.map((f) => f.split(/[\\/]/).pop()).join(" og ");
+      $("siste-opptak").textContent = `${navn} · ${tidLang(r.sekunder)}`;
+      melding(r.tapt ? `Opptaket er lagret, men ${r.tapt} samples ble ikke skrevet. Er disken full?` : `Opptaket er lagret i ${r.mappe}`, r.tapt ? "feil" : "ok");
+    }
+  } catch (e) { visFeil(e); }
+}
+
+// ---------- Status (oppdateres hele tiden) ----------
+async function oppdater() {
+  let s;
+  try { s = await kall("status"); } catch (e) { s = null; }
+  if (s) {
+    $("onair").classList.toggle("paa", !!s.on_air);
+    $("klokke").classList.toggle("av", !s.on_air);
+    $("klokke-status").textContent = s.on_air ? "ON AIR" : "OFF AIR";
+    const p = $("lydkort-prikk");
+    if (s.kjorer) {
+      p.style.background = s.inngang_tom > 0 ? "var(--rav)" : "var(--gronn)";
+      $("lydkort-tekst").textContent = s.utgang + (s.inngang ? " · " + s.inngang : "");
+      $("lyd-detaljer").textContent = `buffer ${s.buffer_ms.toFixed(1).replace(".", ",")} ms`;
+    } else { p.style.background = "var(--svak)"; $("lydkort-tekst").textContent = "Lydkort ikke startet"; $("lyd-detaljer").textContent = ""; }
+    for (const [id, v, h] of s.kanaler) if (striper[id]) settMaaler(striper[id].maaler, v, h);
+    if (masterMaaler) {
+      settMaaler(masterMaaler, s.master[0], s.master[1]);
+      const mt = $("master-topp"); if (mt) { const t = Math.max(masterMaaler.holdt[0], masterMaaler.holdt[1]); mt.textContent = t <= -89 ? "−∞" : (t < 0 ? "−" : "") + Math.abs(t).toFixed(1); mt.style.color = t > -1 ? "var(--rod2)" : "var(--tekst)"; }
+    }
+    for (const id in spillerEl) {
+      const e = spillerEl[id], sp = s.spillere[id];
+      if (!sp || !e.lastet) continue;
+      const [pos, len, spiller] = sp;
+      e.spiller = spiller; e.d.classList.toggle("spiller-paa", spiller);
+      e.spill.textContent = spiller ? "■ Stopp" : "▶ Spill";
+      e.bar.style.width = (len ? pos / len * 100 : 0) + "%";
+      e.tid.textContent = tid(pos) + " / " + tid(len);
+    }
+    opptakGaar = s.opptak.length > 0;
+    $("rec").classList.toggle("paa", opptakGaar);
+    $("rec-tekst").textContent = opptakGaar ? "Opptak" : "Start opptak";
+    $("rec-tid").textContent = opptakGaar ? tidLang(s.opptak[0][1]) : "";
+    $("helse").textContent = !s.kjorer ? "Klar" : s.inngang_tom > 0 ? `Lyden har hakket ${s.inngang_tom} gang${s.inngang_tom === 1 ? "" : "er"} – prøv større buffer` : "Alt i orden";
+    $("helse-prikk").style.background = !s.kjorer ? "var(--svak)" : s.inngang_tom > 0 ? "var(--rav)" : "var(--gronn)";
+  }
+  setTimeout(oppdater, 50);
+}
+
+// ---------- Klokke ----------
+const klokkePrikker = [];
+(function byggKlokke() {
+  const k = $("klokke");
+  for (let i = 0; i < 60; i++) {
+    const a = (i / 60) * 2 * Math.PI - Math.PI / 2;
+    if (i % 5 === 0) { const t = document.createElement("div"); t.className = "p"; Object.assign(t.style, { left: Math.round(124 + 113 * Math.cos(a) - 4) + "px", top: Math.round(124 + 113 * Math.sin(a) - 4) + "px", width: "8px", height: "8px", background: "var(--rod2)" }); k.appendChild(t); }
+    const d = document.createElement("div"); d.className = "p";
+    Object.assign(d.style, { left: Math.round(124 + 98 * Math.cos(a) - 3) + "px", top: Math.round(124 + 98 * Math.sin(a) - 3) + "px", width: "6px", height: "6px" });
+    k.appendChild(d); klokkePrikker.push(d);
+  }
+})();
+function tikk() {
+  const n = new Date(), s = n.getSeconds();
+  $("klokke-hm").textContent = pad(n.getHours()) + ":" + pad(n.getMinutes());
+  $("klokke-ss").textContent = pad(s);
+  $("topp-klokke").textContent = pad(n.getHours()) + ":" + pad(n.getMinutes()) + ":" + pad(s);
+  klokkePrikker.forEach((d, i) => { d.style.background = i <= s ? "var(--rod2)" : "#2a1414"; });
+  setTimeout(tikk, 1000 - n.getMilliseconds() + 5);
+}
+
+function visFeil(e) { melding(String(e && e.message ? e.message : e), "feil"); }
+
+// ---------- Demo i nettleser (bare for å se på designet) ----------
+const Demo = (() => {
+  let paa = false, t0 = 0, rec = null; const sp = {};
+  const kan = [
+    { id: "mik1", navn: "Mikrofon 1", hvem: "Inngang 1", type: "MIC", privat: false, til_master: true, til_dj_ren: false, til_studio: true, fader: -4 },
+    { id: "inn2", navn: "Inngang 2", hvem: "Inngang 2", type: "MIC", privat: false, til_master: true, til_dj_ren: false, til_studio: true, fader: -200 },
+    { id: "spillerA", navn: "Spiller A", hvem: "Avvikling", type: "SPILLER", privat: false, til_master: true, til_dj_ren: false, til_studio: true, fader: 0 },
+    { id: "jingler", navn: "Jingler", hvem: "Lydknapper", type: "SPILLER", privat: false, til_master: true, til_dj_ren: false, til_studio: true, fader: 0 }
+  ];
+  const r = () => Math.random();
+  return {
+    enheter: () => [
+      { navn: "SPL Phonitor", inn_kanaler: 0, ut_kanaler: 2, stotter_48k: true },
+      { navn: "Scarlett 2i2 USB", inn_kanaler: 2, ut_kanaler: 2, stotter_48k: true },
+      { navn: "MacBook Pro-høyttalere", inn_kanaler: 0, ut_kanaler: 2, stotter_48k: true }],
+    start_lyd: () => { paa = true; t0 = Date.now(); return kan; },
+    stopp_lyd: () => { paa = false; },
+    sett: () => null,
+    testtone: () => { sp.spillerA = { len: 7.5, t: Date.now(), spill: false }; return { navn: "Testtone 1 kHz −18 dBFS + venstre/høyre", sekunder: 7.5 }; },
+    last_fil: (a) => { sp[a.kanal] = { len: 214, t: Date.now(), spill: false }; return { navn: "demo.wav", sekunder: 214 }; },
+    spill: (a) => { if (sp[a.kanal]) { sp[a.kanal].spill = a.spill; sp[a.kanal].t = Date.now(); } },
+    start_opptak: () => { rec = Date.now(); return []; },
+    stopp_opptak: () => { const s = (Date.now() - rec) / 1000; rec = null; return { filer: ["2026-10-17 223000 Program.wav", "2026-10-17 223000 DJ-ren.wav"], sekunder: s, tapt: 0, mappe: "Musikk/Klubblisten opptak" }; },
+    status: () => ({
+      kjorer: paa, utgang: "SPL Phonitor", inngang: "Scarlett 2i2 USB", buffer_ms: 2.7, on_air: paa, inngang_tom: 0,
+      kanaler: paa ? [["mik1", -14 - r() * 8, -14 - r() * 8], ["inn2", null, null], ["spillerA", -9 - r() * 4, -10 - r() * 4], ["jingler", null, null]] : [],
+      master: paa ? [-7 - r() * 3, -8 - r() * 3] : [null, null],
+      spillere: Object.fromEntries(Object.entries(sp).map(([k, v]) => [k, [v.spill ? ((Date.now() - v.t) / 1000) % v.len : 63, v.len, v.spill]])),
+      opptak: rec ? [["Program", (Date.now() - rec) / 1000, ""]] : []
+    })
+  };
+})();
+
+// ---------- Start ----------
+$("start-lyd").onclick = startLyd;
+$("stopp-lyd").onclick = stoppLyd;
+$("oppdater-enheter").onclick = lastEnheter;
+$("rec").onclick = opptakKnapp;
+$("aapne-mappe").onclick = () => kall("aapne_opptaksmappe").catch(visFeil);
+byggSpillere();
+tikk();
+lastEnheter().then(async () => {
+  const aktiv = await kall("aktivt_oppsett").catch(() => null);
+  if (aktiv) { lyd = true; byggMikser(aktiv[1]); $("stopp-lyd").disabled = false; $("rec").disabled = false; }
+});
+oppdater();
+if (demo) melding("Demovisning i nettleser – ingen ekte lyd.", "ok");
+</script>
+</body>
+</html>

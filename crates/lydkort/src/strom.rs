@@ -71,6 +71,8 @@ pub enum Kommando {
 #[derive(Clone, Debug, Default)]
 pub struct Status {
     pub maalere: Option<Nivaamaalere>,
+    /// Høyeste nivå siden sist `hent_topp` ble kalt (til målere i app-vinduet).
+    pub topp: Option<Nivaamaalere>,
     pub on_air: bool,
     /// Antall ganger inngangen ikke rakk å levere lyd (bør stå på 0).
     pub inngang_tom: u64,
@@ -108,6 +110,18 @@ pub struct Styring {
 impl Styring {
     pub fn send(&self, k: Kommando) {
         let _ = self.kommandoer.send(k);
+    }
+
+    /// Status, med målere som viser høyeste nivå siden forrige kall.
+    pub fn hent_topp(&self) -> Status {
+        match self.status.lock() {
+            Ok(mut s) => {
+                let ut = s.clone();
+                s.topp = None;
+                ut
+            }
+            Err(_) => Status::default(),
+        }
     }
 
     /// Starter opptak av en buss til en WAV-fil.
@@ -451,7 +465,24 @@ impl Lydtraad {
         }
 
         if let Ok(mut st) = self.status.try_lock() {
-            st.maalere = Some(self.motor.nivaamaalere());
+            let n = self.motor.nivaamaalere();
+            st.topp = Some(match st.topp.take() {
+                Some(mut t) => {
+                    for (k, ny) in t.kanaler.iter_mut().zip(&n.kanaler) {
+                        if k.0 == ny.0 {
+                            k.1 = k.1.max(ny.1);
+                            k.2 = k.2.max(ny.2);
+                        }
+                    }
+                    if t.kanaler.len() != n.kanaler.len() {
+                        t.kanaler = n.kanaler.clone();
+                    }
+                    t.master = (t.master.0.max(n.master.0), t.master.1.max(n.master.1));
+                    t
+                }
+                None => n.clone(),
+            });
+            st.maalere = Some(n);
             st.on_air = self.motor.er_on_air();
             st.inngang_tom = self.tom;
             st.klokkejustering = self.justert;

@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-      - run: cargo test --release
+      - run: cargo test --release --workspace --exclude klubblisten-studio
 
   mac:
     needs: test
@@ -22,7 +22,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - run: |
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Bygg appen
+        working-directory: crates/app
+        run: npx --yes @tauri-apps/cli@2 build --target universal-apple-darwin --bundles app,dmg
+      - name: Bygg testprogrammene
+        run: |
           cargo build --release -p studio -p systemsjekk --target aarch64-apple-darwin
           cargo build --release -p studio -p systemsjekk --target x86_64-apple-darwin
           mkdir -p Studio-Suite-Mac
@@ -32,11 +39,11 @@ jobs:
               target/x86_64-apple-darwin/release/$b
           done
           cp pakke/LES-MEG.txt Studio-Suite-Mac/
-          zip -r Studio-Suite-Mac.zip Studio-Suite-Mac
+          cp target/universal-apple-darwin/release/bundle/dmg/*.dmg "Studio-Suite-Mac/Klubblisten Studio.dmg"
       - uses: actions/upload-artifact@v4
         with:
           name: Studio-Suite-Mac
-          path: Studio-Suite-Mac.zip
+          path: Studio-Suite-Mac/
 
   windows:
     needs: test
@@ -44,11 +51,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Bygg appen
+        working-directory: crates/app
+        run: npx --yes @tauri-apps/cli@2 build --bundles nsis
       - run: cargo build --release -p studio -p systemsjekk
       - shell: bash
         run: |
           mkdir -p Studio-Suite-Windows
           cp target/release/studio.exe target/release/systemsjekk.exe pakke/LES-MEG.txt Studio-Suite-Windows/
+          cp target/release/bundle/nsis/*.exe "Studio-Suite-Windows/Klubblisten Studio installer.exe"
       - uses: actions/upload-artifact@v4
         with:
           name: Studio-Suite-Windows
