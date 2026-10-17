@@ -1,0 +1,11 @@
+[package]
+name = "kjerne"
+description = "Lydmotoren og kjernen i Klubblisten Studio Suite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+hound.workspace = true
