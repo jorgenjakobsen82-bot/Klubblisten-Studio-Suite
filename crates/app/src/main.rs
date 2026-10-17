@@ -135,8 +135,9 @@ fn start_lyd(valg: LydValg, tilstand: State<AppTilstand>) -> Result<Vec<KanalInf
 
 #[tauri::command]
 fn stopp_lyd(tilstand: State<AppTilstand>) -> Result<(), String> {
-    let mut opptak = tilstand.opptak.lock().unwrap();
+    // Låserekkefølge overalt: først `lyd`, så `opptak`.
     let mut lyd = tilstand.lyd.lock().unwrap();
+    let mut opptak = tilstand.opptak.lock().unwrap();
     if let Some(k) = lyd.take() {
         for o in opptak.drain(..) {
             let _ = k.styring.stopp_opptak(o);
@@ -168,8 +169,9 @@ struct LastetFil {
     sekunder: f32,
 }
 
+/// Kjøres utenfor hovedtråden, så vinduet ikke fryser mens en stor fil lastes.
 #[tauri::command]
-fn last_fil(kanal: String, sti: String, tilstand: State<AppTilstand>) -> Result<LastetFil, String> {
+async fn last_fil(kanal: String, sti: String, tilstand: State<'_, AppTilstand>) -> Result<LastetFil, String> {
     let p = PathBuf::from(&sti);
     let lyd = lydkort::last_lydfil(&p).map_err(feil)?;
     let sekunder = lyd.lengde() as f32 / kjerne::SAMPLERATE as f32;
@@ -225,7 +227,11 @@ fn endelig(x: f32) -> Option<f32> {
 }
 
 #[tauri::command]
-fn status(tilstand: State<AppTilstand>) -> Tilstandsrapport {
+async fn status(tilstand: State<'_, AppTilstand>) -> Result<Tilstandsrapport, String> {
+    Ok(status_naa(&tilstand))
+}
+
+fn status_naa(tilstand: &State<'_, AppTilstand>) -> Tilstandsrapport {
     let lyd = tilstand.lyd.lock().unwrap();
     let opptak = tilstand.opptak.lock().unwrap();
     let Some(k) = lyd.as_ref() else {
@@ -264,19 +270,19 @@ fn opptaksmappe() -> PathBuf {
 
 #[tauri::command]
 fn start_opptak(tilstand: State<AppTilstand>) -> Result<Vec<String>, String> {
+    let lyd = tilstand.lyd.lock().unwrap();
     let mut opptak = tilstand.opptak.lock().unwrap();
+    let Some(k) = lyd.as_ref() else { return Err("Start lyden før du starter opptak.".into()) };
     if !opptak.is_empty() {
         return Err("Opptaket går allerede.".into());
     }
     let tid = chrono::Local::now().format("%Y-%m-%d %H%M%S").to_string();
     let mappe = opptaksmappe();
-    med_styring(&tilstand, |s| {
-        for buss in [Buss::Program, Buss::DjRen] {
-            let sti = mappe.join(format!("{tid} {}.wav", buss.navn()));
-            opptak.push(s.start_opptak(buss, sti).map_err(|e| format!("Kunne ikke starte opptak: {e}"))?);
-        }
-        Ok(opptak.iter().map(|o| o.sti.display().to_string()).collect())
-    })
+    for buss in [Buss::Program, Buss::DjRen] {
+        let sti = mappe.join(format!("{tid} {}.wav", buss.navn()));
+        opptak.push(k.styring.start_opptak(buss, sti).map_err(|e| format!("Kunne ikke starte opptak: {e}"))?);
+    }
+    Ok(opptak.iter().map(|o| o.sti.display().to_string()).collect())
 }
 
 #[derive(Serialize)]
@@ -289,18 +295,16 @@ struct Opptaksresultat {
 
 #[tauri::command]
 fn stopp_opptak(tilstand: State<AppTilstand>) -> Result<Opptaksresultat, String> {
+    let lyd = tilstand.lyd.lock().unwrap();
     let mut opptak = tilstand.opptak.lock().unwrap();
-    let liste: Vec<Opptak> = opptak.drain(..).collect();
+    let Some(k) = lyd.as_ref() else { return Err("Lyden er ikke startet.".into()) };
     let mut r = Opptaksresultat { filer: vec![], sekunder: 0.0, tapt: 0, mappe: opptaksmappe().display().to_string() };
-    med_styring(&tilstand, |s| {
-        for o in liste {
-            let info = s.stopp_opptak(o).map_err(|e| format!("Feil ved lagring av opptak: {e}"))?;
-            r.sekunder = r.sekunder.max(info.sekunder);
-            r.tapt += info.tapt;
-            r.filer.push(info.sti.display().to_string());
-        }
-        Ok(())
-    })?;
+    for o in opptak.drain(..) {
+        let info = k.styring.stopp_opptak(o).map_err(|e| format!("Feil ved lagring av opptak: {e}"))?;
+        r.sekunder = r.sekunder.max(info.sekunder);
+        r.tapt += info.tapt;
+        r.filer.push(info.sti.display().to_string());
+    }
     Ok(r)
 }
 
