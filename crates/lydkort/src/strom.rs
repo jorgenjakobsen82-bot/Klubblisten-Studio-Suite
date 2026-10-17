@@ -64,6 +64,8 @@ pub enum Kommando {
     Stopp(String),
     /// Spill i løkke.
     Lokke(String, bool),
+    StartOpptak(u64, crate::opptak::Buss, ringbuf::HeapProd<f32>, Arc<std::sync::atomic::AtomicU64>),
+    StoppOpptak(u64),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -108,6 +110,24 @@ impl Styring {
         let _ = self.kommandoer.send(k);
     }
 
+    /// Starter opptak av en buss til en WAV-fil.
+    pub fn start_opptak(&self, buss: crate::opptak::Buss, sti: std::path::PathBuf) -> std::io::Result<crate::opptak::Opptak> {
+        use std::sync::atomic::AtomicU64;
+        static NESTE: AtomicU64 = AtomicU64::new(1);
+        let id = NESTE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // 10 sekunder buffer: disken kan henge en god stund uten at noe går tapt.
+        let (prod, cons) = HeapRb::<f32>::new(SAMPLERATE as usize * 2 * 10).split();
+        let o = crate::opptak::Opptak::start(id, buss, sti, cons)?;
+        self.send(Kommando::StartOpptak(id, buss, prod, o.tapt.clone()));
+        Ok(o)
+    }
+
+    /// Stopper opptaket og lukker fila.
+    pub fn stopp_opptak(&self, opptak: crate::opptak::Opptak) -> std::io::Result<crate::opptak::OpptakInfo> {
+        self.send(Kommando::StoppOpptak(opptak.id));
+        opptak.avslutt()
+    }
+
     pub fn status(&self) -> Status {
         self.status.lock().map(|s| s.clone()).unwrap_or_default()
     }
@@ -120,6 +140,14 @@ impl Lydstrom {
 
     pub fn status(&self) -> Status {
         self.status.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    pub fn start_opptak(&self, buss: crate::opptak::Buss, sti: std::path::PathBuf) -> std::io::Result<crate::opptak::Opptak> {
+        self.styring().start_opptak(buss, sti)
+    }
+
+    pub fn stopp_opptak(&self, opptak: crate::opptak::Opptak) -> std::io::Result<crate::opptak::OpptakInfo> {
+        self.styring().stopp_opptak(opptak)
     }
 
     pub fn styring(&self) -> Styring {
@@ -208,6 +236,8 @@ impl Lydstrom {
             tom: 0,
             justert: 0,
             mellom: Vec::new(),
+            opptak: Vec::new(),
+            flett: Vec::new(),
         };
         let strom_cfg = strom_konfig(&ut_cfg, oppsett.buffer);
         let feil = |e| eprintln!("Feil på utgangen: {e}");
@@ -286,6 +316,8 @@ struct Lydtraad {
     tom: u64,
     justert: u64,
     mellom: Vec<f32>,
+    opptak: Vec<(u64, crate::opptak::Buss, ringbuf::HeapProd<f32>, Arc<std::sync::atomic::AtomicU64>)>,
+    flett: Vec<f32>,
 }
 
 impl Lydtraad {
@@ -316,6 +348,8 @@ impl Lydtraad {
                         s.lokke = p;
                     }
                 }
+                Kommando::StartOpptak(id, buss, prod, tapt) => self.opptak.push((id, buss, prod, tapt)),
+                Kommando::StoppOpptak(id) => self.opptak.retain(|o| o.0 != id),
             }
         }
     }
@@ -391,6 +425,21 @@ impl Lydtraad {
             inn.insert(String::new(), Blokk::stille(n));
         }
         let ut = self.motor.prosesser(&inn);
+        for (_, buss, prod, tapt) in self.opptak.iter_mut() {
+            let kilde = match buss {
+                crate::opptak::Buss::Program => &ut.program,
+                crate::opptak::Buss::DjRen => &ut.dj_ren,
+            };
+            self.flett.clear();
+            for f in 0..kilde.lengde() {
+                self.flett.push(kilde.v[f]);
+                self.flett.push(kilde.h[f]);
+            }
+            let skrevet = prod.push_slice(&self.flett);
+            if skrevet < self.flett.len() {
+                tapt.fetch_add(((self.flett.len() - skrevet) / 2) as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         let mut valgt = match self.lytt {
             Lytt::Hodetelefoner => ut.hodetelefoner,
             Lytt::Hoyttalere => ut.hoyttalere,
@@ -478,6 +527,8 @@ mod tester {
             tom: 0,
             justert: 0,
             mellom: Vec::new(),
+            opptak: Vec::new(),
+            flett: Vec::new(),
         };
         (t, p, tx)
     }
@@ -515,5 +566,27 @@ mod tester {
         assert!(!t.spillere["spillerA"].spiller, "skal stoppe av seg selv");
         let st = t.status.lock().unwrap();
         assert!(st.maalere.is_some());
+    }
+
+    #[test]
+    fn opptak_av_program_er_bit_identisk_med_det_som_spilles() {
+        let (mut t, _p, tx) = traad(false);
+        t.motor.sett("kanal/mik1/fader", Verdi::Tall(-200.0)).unwrap();
+        let lyd = kjerne::testlyd::rosa_stoy(-20.0, 0.2);
+        tx.send(Kommando::Last("spillerA".into(), lyd.clone())).unwrap();
+        tx.send(Kommando::Spill("spillerA".into())).unwrap();
+        let sti = std::env::temp_dir().join("studio-suite-opptakstest").join("program.wav");
+        let (prod, cons) = HeapRb::<f32>::new(48_000 * 2).split();
+        let o = crate::opptak::Opptak::start(7, crate::opptak::Buss::Program, sti.clone(), cons).unwrap();
+        tx.send(Kommando::StartOpptak(7, crate::opptak::Buss::Program, prod, o.tapt.clone())).unwrap();
+        for _ in 0..100 {
+            t.lag(128); // 12 800 samples > 9 600 i lyden
+        }
+        tx.send(Kommando::StoppOpptak(7)).unwrap();
+        t.lag(128);
+        let info = o.avslutt().unwrap();
+        assert_eq!(info.tapt, 0);
+        let lest = kjerne::testlyd::les_wav(&sti).unwrap();
+        assert_eq!(lest.utsnitt(0, lyd.lengde()), lyd, "opptaket skal være nøyaktig det som ble spilt");
     }
 }
