@@ -60,6 +60,9 @@ pub enum Kommando {
     Sett(String, Verdi),
     /// Legg en lydfil i spilleren på en kanal.
     Last(String, Blokk),
+    /// Legg en lydfil i spilleren med cue-punkter, som én udelelig operasjon. Avvises
+    /// (svar = false) hvis spilleren spiller – da endres verken fil eller cue-punkter.
+    LastMedCue { kanal: String, lyd: Blokk, start: f32, slutt: f32, svar: Sender<bool> },
     Spill(String),
     Stopp(String),
     /// Spill i løkke.
@@ -343,6 +346,18 @@ impl Styring {
         }
     }
 
+    /// Legger en fil med cue-punkter i en spiller og venter på svar fra lyd-tråden.
+    /// Feiler (uten å endre noe) hvis spilleren spiller.
+    pub fn last_med_cue(&self, kanal: &str, lyd: Blokk, start: f32, slutt: f32) -> Result<(), String> {
+        let (tx, rx) = channel();
+        self.send(Kommando::LastMedCue { kanal: kanal.to_string(), lyd, start, slutt, svar: tx });
+        match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("Spilleren spiller nå. Stopp den først – fila ble ikke byttet.".into()),
+            Err(_) => Err("Lydkortet svarer ikke – fila ble ikke lastet.".into()),
+        }
+    }
+
     /// Starter opptak av en buss til en WAV-fil.
     pub fn start_opptak(&self, buss: crate::opptak::Buss, sti: std::path::PathBuf) -> std::io::Result<crate::opptak::Opptak> {
         use std::sync::atomic::AtomicU64;
@@ -584,6 +599,27 @@ struct Lydtraad {
 }
 
 impl Lydtraad {
+    /// Legger en fil i en spiller. Siste sikring: en spiller som spiller på lufta
+    /// byttes aldri ut. Returnerer om fila ble lagt inn.
+    fn last(&mut self, id: String, lyd: Blokk, cue: Option<(f32, f32)>) -> bool {
+        if self.spillere.get(&id).is_some_and(|s| s.spiller) {
+            let _ = self.soppel.send(Spiller::ny(lyd));
+            return false;
+        }
+        let lokke = self.spillere.get(&id).map(|s| s.lokke).unwrap_or(false);
+        let mut s = Spiller::ny(lyd);
+        s.lokke = lokke;
+        if let Some((start, slutt)) = cue {
+            let sr = SAMPLERATE as f32;
+            s.sett_markorer((start.max(0.0) * sr) as usize, (slutt.max(0.0) * sr) as usize);
+        }
+        if let Some(gammel) = self.spillere.insert(id, s) {
+            // Å frigjøre en stor fil kan ta flere millisekunder: gjøres i en annen tråd.
+            let _ = self.soppel.send(gammel);
+        }
+        true
+    }
+
     fn kommandoer(&mut self) {
         while let Ok(k) = self.rx.try_recv() {
             match k {
@@ -591,21 +627,11 @@ impl Lydtraad {
                     let _ = self.motor.sett(&a, v);
                 }
                 Kommando::Last(id, lyd) => {
-                    // Siste sikring: en spiller som spiller på lufta byttes aldri ut.
-                    if self.spillere.get(&id).is_some_and(|s| s.spiller) {
-                        let _ = self.soppel.send(Spiller::ny(lyd));
-                        if let Ok(mut st) = self.status.try_lock() {
-                            st.feil = Some(format!("{id} spilte – fila ble ikke byttet"));
-                        }
-                        continue;
-                    }
-                    let lokke = self.spillere.get(&id).map(|s| s.lokke).unwrap_or(false);
-                    let mut s = Spiller::ny(lyd);
-                    s.lokke = lokke;
-                    if let Some(gammel) = self.spillere.insert(id, s) {
-                        // Å frigjøre en stor fil kan ta flere millisekunder: gjøres i en annen tråd.
-                        let _ = self.soppel.send(gammel);
-                    }
+                    self.last(id, lyd, None);
+                }
+                Kommando::LastMedCue { kanal, lyd, start, slutt, svar } => {
+                    let ok = self.last(kanal, lyd, Some((start, slutt)));
+                    let _ = svar.send(ok);
                 }
                 Kommando::Spill(id) => {
                     if let Some(s) = self.spillere.get_mut(&id) {
@@ -1087,5 +1113,30 @@ mod tester {
         t.lag(64);
         let st = t.spillere["spillerA"].status();
         assert!(st.spiller && (st.lengde - 3.0).abs() < 1e-3, "den gamle fila skal fortsatt spille");
+    }
+
+    #[test]
+    fn avvist_last_endrer_ikke_cue_paa_laata_som_gaar() {
+        let (mut t, _p, tx) = traad(false);
+        tx.send(Kommando::Last("spillerA".into(), jevn_lyd())).unwrap();
+        tx.send(Kommando::Spill("spillerA".into())).unwrap();
+        t.lag(64);
+        let (svar_tx, svar_rx) = channel();
+        tx.send(Kommando::LastMedCue { kanal: "spillerA".into(), lyd: kjerne::testlyd::stillhet(1.0), start: 0.0, slutt: 0.05, svar: svar_tx }).unwrap();
+        t.lag(64);
+        assert_eq!(svar_rx.try_recv(), Ok(false));
+        let st = t.spillere["spillerA"].status();
+        assert!(st.spiller && (st.slutt - 3.0).abs() < 1e-3 && (st.lengde - 3.0).abs() < 1e-3, "{st:?}");
+        // Stoppet: nå godtas fil og cue samlet.
+        tx.send(Kommando::Stopp("spillerA".into())).unwrap();
+        for _ in 0..5 {
+            t.lag(64);
+        }
+        let (svar_tx, svar_rx) = channel();
+        tx.send(Kommando::LastMedCue { kanal: "spillerA".into(), lyd: kjerne::testlyd::stillhet(1.0), start: 0.1, slutt: 0.9, svar: svar_tx }).unwrap();
+        t.lag(64);
+        assert_eq!(svar_rx.try_recv(), Ok(true));
+        let st = t.spillere["spillerA"].status();
+        assert!((st.start - 0.1).abs() < 1e-3 && (st.slutt - 0.9).abs() < 1e-3 && (st.pos - 0.1).abs() < 1e-3);
     }
 }

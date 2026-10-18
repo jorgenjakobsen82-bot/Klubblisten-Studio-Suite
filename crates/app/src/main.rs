@@ -280,12 +280,9 @@ async fn last_fil(kanal: String, sti: String, tilstand: State<'_, AppTilstand>) 
     let svar = LastetFil { navn, sekunder, info: Some(fil.info), markorer: markorer.clone(), sti: Some(sti) };
     let mut lyd = tilstand.lyd.lock().unwrap();
     let Some(k) = lyd.as_mut() else { return Err("Lyden er ikke startet.".into()) };
-    // Sjekk igjen etter dekodingen (den kan ta flere sekunder): spiller den nå, byttes ingenting.
-    if k.styring.status().spillere.get(&kanal).is_some_and(|s| s.spiller) {
-        return Err("Spilleren startet mens fila ble lest inn. Stopp den først – fila ble ikke byttet.".into());
-    }
-    k.styring.send(Kommando::Last(kanal.clone(), fil.lyd));
-    k.styring.send(Kommando::Markorer(kanal.clone(), markorer.start, markorer.slutt));
+    // Fil og cue-punkter godtas eller avvises samlet av lyd-tråden. Spiller spilleren
+    // (også om den ble startet mens fila ble lest inn), endres ingenting.
+    k.styring.last_med_cue(&kanal, fil.lyd, markorer.start, markorer.slutt)?;
     k.spillere.insert(kanal, svar.clone());
     Ok(svar)
 }
@@ -320,7 +317,7 @@ fn testtone(kanal: String, tilstand: State<AppTilstand>) -> Result<LastetFil, St
     let svar = LastetFil { navn: "Testtone".into(), sekunder, info: Some(info), markorer, sti: None };
     let mut l = tilstand.lyd.lock().unwrap();
     let Some(k) = l.as_mut() else { return Err("Lyden er ikke startet.".into()) };
-    k.styring.send(Kommando::Last(kanal.clone(), lyd));
+    k.styring.last_med_cue(&kanal, lyd, 0.0, sekunder)?;
     k.spillere.insert(kanal, svar.clone());
     Ok(svar)
 }
