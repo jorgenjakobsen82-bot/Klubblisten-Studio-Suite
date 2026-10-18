@@ -108,11 +108,42 @@ struct Maalertilstand {
     rms2: [f32; 2],
     /// Toppnivå før fader (etter trim) – til å stille inngangsnivået.
     inn_topp: f32,
-    /// Antall samples som har klippet siden start (vises til den nullstilles).
+    /// Antall klipp siden start (vises til den nullstilles).
     klipp: u32,
+    /// Antall samples på rad på full skala. Klipp = minst 3 på rad (vanlig standard),
+    /// så moderne mastere som så vidt berører 0 dBFS ikke tenner lampa hele tiden.
+    paa_rad: u8,
 }
 
 impl Maalertilstand {
+    /// Teller klipp: tre samples på rad på full skala.
+    #[inline]
+    fn sjekk_klipp(&mut self, abs: f32) {
+        if abs >= 0.999 {
+            self.paa_rad = self.paa_rad.saturating_add(1);
+            if self.paa_rad == 3 {
+                self.klipp = self.klipp.saturating_add(1);
+            }
+        } else {
+            self.paa_rad = 0;
+        }
+    }
+
+    /// Nullstiller toppverdiene etter at målerne er lest (så ingen topper går tapt mellom lesninger).
+    fn nullstill_topp(&mut self) {
+        self.topp = [0.0; 2];
+        self.inn_topp = 0.0;
+    }
+
+    /// Hindrer at RMS-verdien blir et «denormalt» tall i stillhet (gjør prosessoren treg).
+    fn rydd(&mut self) {
+        for r in &mut self.rms2 {
+            if *r < 1e-20 {
+                *r = 0.0;
+            }
+        }
+    }
+
     /// Tidskonstant for RMS-måleren (300 ms, som en VU-måler).
     fn rms_faktor() -> f32 {
         1.0 - (-1.0 / (0.3 * SAMPLERATE as f32)).exp()
@@ -165,9 +196,12 @@ impl Kanal {
         }
     }
 
-    /// Kanalen gir lyd: slått på, ikke mutet og faderen over −60 dB.
+    /// Til fader-start: kanalen er slått på og faderen er oppe. Mute teller ikke
+    /// (å av-mute skal ikke starte en låt). Hysterese: start over −60 dB, stopp under −70 dB,
+    /// så en fader som står og vipper rundt −60 ikke starter og stopper om hverandre.
     fn er_oppe(&self) -> bool {
-        self.paa && !self.mute && self.fader_db > -60.0
+        let grense = if self.var_oppe { -70.0 } else { -60.0 };
+        self.paa && self.fader_db > grense
     }
 
     fn kjede_forsinkelse(&self) -> usize {
@@ -634,6 +668,15 @@ impl Motor {
         }
     }
 
+    /// Nullstiller toppverdiene etter lesing. Målerne viser høyeste verdi siden forrige lesing,
+    /// så ingen korte topper forsvinner selv om skjermen leser sjeldnere enn lyden går.
+    pub fn nullstill_maaletopp(&mut self) {
+        for k in &mut self.kanaler {
+            k.maal.nullstill_topp();
+        }
+        self.master_maal.nullstill_topp();
+    }
+
     /// Nullstiller klippvarselet på master.
     pub fn nullstill_master_klipp(&mut self) {
         self.master_maal.klipp = 0;
@@ -737,9 +780,7 @@ impl Motor {
                 k.maal.rms2[1] += (sh * sh - k.maal.rms2[1]) * rf;
                 let inn_abs = l.v[i].abs().max(l.h[i].abs());
                 k.maal.inn_topp = k.maal.inn_topp.max(inn_abs);
-                if inn_abs >= 0.999 {
-                    k.maal.klipp = k.maal.klipp.saturating_add(1);
-                }
+                k.maal.sjekk_klipp(inn_abs);
                 if til_master {
                     master.v[i] += a.v[i] * g * pv;
                     master.h[i] += a.h[i] * g * ph;
@@ -750,7 +791,8 @@ impl Motor {
                 }
             }
 
-            k.maal.topp = topp;
+            k.maal.topp = [k.maal.topp[0].max(topp[0]), k.maal.topp[1].max(topp[1])];
+            k.maal.rydd();
             if k.paa && !k.mute {
                 k.paa_samples += len as u64;
             }
@@ -806,21 +848,20 @@ impl Motor {
 
         let rf = Maalertilstand::rms_faktor();
         let mut mt = [0.0f32; 2];
-        let mut mk = 0u32;
+        let klipp_foer = self.master_maal.klipp;
         for i in 0..len {
             let (v, h) = (p.v[i], p.h[i]);
             mt[0] = mt[0].max(v.abs());
             mt[1] = mt[1].max(h.abs());
             self.master_maal.rms2[0] += (v * v - self.master_maal.rms2[0]) * rf;
             self.master_maal.rms2[1] += (h * h - self.master_maal.rms2[1]) * rf;
-            if v.abs() >= 0.999 || h.abs() >= 0.999 {
-                mk += 1;
-            }
+            self.master_maal.sjekk_klipp(v.abs().max(h.abs()));
         }
-        self.master_maal.topp = mt;
-        self.master_maal.inn_topp = mt[0].max(mt[1]);
-        if mk > 0 {
-            self.master_maal.klipp = self.master_maal.klipp.saturating_add(mk);
+        let m = &mut self.master_maal;
+        m.topp = [m.topp[0].max(mt[0]), m.topp[1].max(mt[1])];
+        m.inn_topp = m.inn_topp.max(mt[0].max(mt[1]));
+        m.rydd();
+        if self.master_maal.klipp > klipp_foer {
             self.hendelser.send(Hendelse::Klipping { sted: "Master".into() });
         }
 
@@ -1021,6 +1062,9 @@ mod tester {
         for _ in 0..20 {
             m.prosesser(&innganger(&[("a", testlyd::tone(1000.0, -18.0, 0.1))]));
         }
+        // Målerne holder høyeste verdi til de er lest; nullstill og mål på nytt.
+        m.nullstill_maaletopp();
+        m.prosesser(&innganger(&[("a", testlyd::tone(1000.0, -18.0, 0.1))]));
         let n = m.nivaamaalere();
         let a = n.kanaler.iter().find(|k| k.id == "a").unwrap();
         let b = n.kanaler.iter().find(|k| k.id == "b").unwrap();
@@ -1078,7 +1122,11 @@ mod tester {
     fn klippvarsel_blir_staaende_til_det_nullstilles() {
         let mut m = Motor::ny();
         m.legg_til_kanal(KanalOppsett::ny("a", "A", Kanaltype::LinjeStereo)).unwrap();
+        // En sinus som så vidt berører 0 dBFS er ikke klipp …
         m.prosesser(&innganger(&[("a", testlyd::tone(1000.0, 0.0, 0.1))]));
+        assert_eq!(m.nivaamaalere().kanaler[0].klipp, 0);
+        // … men tre samples eller mer på full skala er det.
+        m.prosesser(&innganger(&[("a", Blokk { v: vec![1.0; 100], h: vec![1.0; 100] })]));
         m.prosesser(&innganger(&[("a", testlyd::stillhet(0.5))]));
         let n = m.nivaamaalere();
         assert!(n.kanaler[0].klipp > 0);
@@ -1100,5 +1148,47 @@ mod tester {
         assert_eq!((ut.program.v[100], ut.program.h[100]), (-0.5, -0.5));
         assert_eq!((ut.hodetelefoner.v[100], ut.hodetelefoner.h[100]), (-0.5, -0.5));
         assert_eq!(m.hent("kanal/a/modus"), Some(Verdi::Valg(2)));
+    }
+
+    #[test]
+    fn inn_maaler_faller_etter_lesing() {
+        let mut m = Motor::ny();
+        m.legg_til_kanal(KanalOppsett::ny("a", "A", Kanaltype::LinjeStereo)).unwrap();
+        m.prosesser(&innganger(&[("a", testlyd::tone(1000.0, -3.0, 0.1))]));
+        assert!(m.nivaamaalere().kanaler[0].inn_topp > -3.5);
+        m.nullstill_maaletopp();
+        m.prosesser(&innganger(&[("a", testlyd::stillhet(0.1))]));
+        assert_eq!(m.nivaamaalere().kanaler[0].inn_topp, f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn fader_start_har_hysterese_og_mute_starter_ikke() {
+        let mut m = Motor::ny();
+        m.legg_til_kanal(KanalOppsett::ny("a", "A", Kanaltype::Spiller)).unwrap();
+        m.hendelser();
+        // Opp er over −60; den stopper ikke før under −70.
+        m.sett("kanal/a/fader", Verdi::Tall(-65.0)).unwrap();
+        assert!(m.hendelser().iter().all(|h| !matches!(h, Hendelse::FaderStopp { .. })));
+        m.sett("kanal/a/fader", Verdi::Tall(-75.0)).unwrap();
+        assert!(m.hendelser().contains(&Hendelse::FaderStopp { kanal: "a".into() }));
+        m.sett("kanal/a/fader", Verdi::Tall(-65.0)).unwrap();
+        assert!(m.hendelser().iter().all(|h| !matches!(h, Hendelse::FaderStart { .. })));
+        m.sett("kanal/a/fader", Verdi::Tall(-10.0)).unwrap();
+        assert!(m.hendelser().contains(&Hendelse::FaderStart { kanal: "a".into() }));
+        // Mute/av-mute starter eller stopper ikke spilleren.
+        m.sett("kanal/a/mute", Verdi::AvPaa(true)).unwrap();
+        m.sett("kanal/a/mute", Verdi::AvPaa(false)).unwrap();
+        assert!(m.hendelser().iter().all(|h| !matches!(h, Hendelse::FaderStart { .. } | Hendelse::FaderStopp { .. })));
+    }
+
+    #[test]
+    fn stillhet_gir_ingen_denormaler() {
+        let mut m = Motor::ny();
+        m.legg_til_kanal(KanalOppsett::ny("a", "A", Kanaltype::LinjeStereo)).unwrap();
+        m.sett("kanal/a/hpf", Verdi::AvPaa(true)).unwrap();
+        m.prosesser(&innganger(&[("a", testlyd::rosa_stoy(-10.0, 0.5))]));
+        m.prosesser(&innganger(&[("a", testlyd::stillhet(16.0))]));
+        let k = &m.nivaamaalere().kanaler[0];
+        assert_eq!(k.rms[0], f32::NEG_INFINITY, "RMS skal lande på nøyaktig null i stillhet");
     }
 }

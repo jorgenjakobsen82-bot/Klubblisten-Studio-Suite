@@ -17,8 +17,12 @@ use tauri::State;
 struct Kjorende {
     styring: Styring,
     stopp: mpsc::Sender<()>,
+    /// Speiling av kanalenes kontroller slik de står nå – så vinduet kan bygges opp igjen riktig.
     kanaler: Vec<KanalInfo>,
     oppsett: LydValg,
+    /// Hva som ligger i hver spiller (uten selve lyden), med cue-punkter.
+    spillere: std::collections::HashMap<String, LastetFil>,
+    master_db: f32,
 }
 
 #[derive(Default)]
@@ -138,7 +142,7 @@ fn start_lyd(valg: LydValg, tilstand: State<AppTilstand>) -> Result<Vec<KanalInf
         })
         .map_err(feil)?;
     let styring = svar_rx.recv().map_err(feil)??;
-    *tilstand.lyd.lock().unwrap() = Some(Kjorende { styring, stopp: stopp_tx, kanaler: kanaler.clone(), oppsett: valg });
+    *tilstand.lyd.lock().unwrap() = Some(Kjorende { styring, stopp: stopp_tx, kanaler: kanaler.clone(), oppsett: valg, spillere: Default::default(), master_db: 0.0 });
     Ok(kanaler)
 }
 
@@ -166,13 +170,26 @@ fn med_styring<T>(tilstand: &State<AppTilstand>, f: impl FnOnce(&Styring) -> Res
 
 #[tauri::command]
 fn sett(adresse: String, verdi: Verdi, tilstand: State<AppTilstand>) -> Result<(), String> {
-    med_styring(&tilstand, |s| {
-        s.send(Kommando::Sett(adresse, verdi));
-        Ok(())
-    })
+    let mut lyd = tilstand.lyd.lock().unwrap();
+    let Some(k) = lyd.as_mut() else { return Err("Lyden er ikke startet. Velg lydkort og trykk Start.".into()) };
+    // Speil verdien, så vinduet viser riktig hvis det lastes på nytt.
+    if let ["kanal", id, kontroll] = adresse.split('/').collect::<Vec<_>>().as_slice() {
+        if let Some(info) = k.kanaler.iter_mut().find(|i| i.id == *id) {
+            if info.kontroller.contains_key(*kontroll) {
+                info.kontroller.insert(kontroll.to_string(), verdi.clone());
+            }
+        }
+    }
+    if adresse == "master/fader" {
+        if let Some(db) = verdi.som_tall() {
+            k.master_db = db;
+        }
+    }
+    k.styring.send(Kommando::Sett(adresse, verdi));
+    Ok(())
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct LastetFil {
     navn: String,
     sekunder: f32,
@@ -224,6 +241,15 @@ fn hent_markorer(sti: &std::path::Path) -> Option<Markorer> {
 
 #[tauri::command]
 fn lagre_markorer(kanal: String, sti: String, markorer: Markorer, tilstand: State<AppTilstand>) -> Result<(), String> {
+    // Først til spilleren (det som høres), så til disk.
+    {
+        let mut lyd = tilstand.lyd.lock().unwrap();
+        let Some(k) = lyd.as_mut() else { return Err("Lyden er ikke startet.".into()) };
+        k.styring.send(Kommando::Markorer(kanal.clone(), markorer.start, markorer.slutt));
+        if let Some(f) = k.spillere.get_mut(&kanal) {
+            f.markorer = markorer.clone();
+        }
+    }
     let p = PathBuf::from(&sti);
     if let Some((storrelse, endret)) = fil_id(&p) {
         let mut db = les_cue_db();
@@ -235,12 +261,9 @@ fn lagre_markorer(kanal: String, sti: String, markorer: Markorer, tilstand: Stat
         // Skriv til midlertidig fil og bytt, så databasen aldri blir halvskrevet.
         let tmp = fil.with_extension("tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(&db).map_err(feil)?).map_err(feil)?;
-        std::fs::rename(&tmp, &fil).map_err(feil)?;
+        std::fs::rename(&tmp, &fil).map_err(|e| format!("Cue-punktene virker, men kunne ikke lagres til neste gang: {e}"))?;
     }
-    med_styring(&tilstand, |s| {
-        s.send(Kommando::Markorer(kanal, markorer.start, markorer.slutt));
-        Ok(())
-    })
+    Ok(())
 }
 
 /// Kjøres utenfor hovedtråden, så vinduet ikke fryser mens en stor fil lastes og analyseres.
@@ -253,12 +276,13 @@ async fn last_fil(kanal: String, sti: String, tilstand: State<'_, AppTilstand>) 
     let markorer = hent_markorer(&p).unwrap_or(Markorer { start: a.start, slutt: a.slutt, intro: None, miks_ut: a.miks_ut, manuell: false });
     let sekunder = fil.info.sekunder;
     let navn = fil.info.filnavn.clone();
-    med_styring(&tilstand, |s| {
-        s.send(Kommando::Last(kanal.clone(), fil.lyd));
-        s.send(Kommando::Markorer(kanal, markorer.start, markorer.slutt));
-        Ok(())
-    })?;
-    Ok(LastetFil { navn, sekunder, info: Some(fil.info), markorer, sti: Some(sti) })
+    let svar = LastetFil { navn, sekunder, info: Some(fil.info), markorer: markorer.clone(), sti: Some(sti) };
+    let mut lyd = tilstand.lyd.lock().unwrap();
+    let Some(k) = lyd.as_mut() else { return Err("Lyden er ikke startet.".into()) };
+    k.styring.send(Kommando::Last(kanal.clone(), fil.lyd));
+    k.styring.send(Kommando::Markorer(kanal.clone(), markorer.start, markorer.slutt));
+    k.spillere.insert(kanal, svar.clone());
+    Ok(svar)
 }
 
 #[tauri::command]
@@ -288,18 +312,21 @@ fn testtone(kanal: String, tilstand: State<AppTilstand>) -> Result<LastetFil, St
         bolge: lydkort::lydfil::bolgeform(&lyd),
     };
     let markorer = Markorer { start: 0.0, slutt: sekunder, intro: None, miks_ut: sekunder, manuell: false };
-    med_styring(&tilstand, |s| {
-        s.send(Kommando::Last(kanal, lyd));
-        Ok(())
-    })?;
-    Ok(LastetFil { navn: "Testtone".into(), sekunder, info: Some(info), markorer, sti: None })
+    let svar = LastetFil { navn: "Testtone".into(), sekunder, info: Some(info), markorer, sti: None };
+    let mut l = tilstand.lyd.lock().unwrap();
+    let Some(k) = l.as_mut() else { return Err("Lyden er ikke startet.".into()) };
+    k.styring.send(Kommando::Last(kanal.clone(), lyd));
+    k.spillere.insert(kanal, svar.clone());
+    Ok(svar)
 }
 
 #[tauri::command]
 fn spill(kanal: String, spill: bool, lokke: Option<bool>, tilstand: State<AppTilstand>) -> Result<(), String> {
     med_styring(&tilstand, |s| {
+        // Løkke er en egen bryter: den rører ikke avspillingen.
         if let Some(l) = lokke {
-            s.send(Kommando::Lokke(kanal.clone(), l));
+            s.send(Kommando::Lokke(kanal, l));
+            return Ok(());
         }
         s.send(if spill { Kommando::Spill(kanal) } else { Kommando::Stopp(kanal) });
         Ok(())
@@ -427,8 +454,9 @@ fn aapne_opptaksmappe() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn aktivt_oppsett(tilstand: State<AppTilstand>) -> Option<(LydValg, Vec<KanalInfo>)> {
-    tilstand.lyd.lock().unwrap().as_ref().map(|k| (k.oppsett.clone(), k.kanaler.clone()))
+#[allow(clippy::type_complexity)]
+fn aktivt_oppsett(tilstand: State<AppTilstand>) -> Option<(LydValg, Vec<KanalInfo>, std::collections::HashMap<String, LastetFil>, f32)> {
+    tilstand.lyd.lock().unwrap().as_ref().map(|k| (k.oppsett.clone(), k.kanaler.clone(), k.spillere.clone(), k.master_db))
 }
 
 fn main() {

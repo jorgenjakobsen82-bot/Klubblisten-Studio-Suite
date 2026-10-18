@@ -646,6 +646,9 @@ function lastet(id, f) {
 }
 async function lastFil(id, sti) {
   if (!lyd) { melding("Start lyden først, så kan du laste filer.", "feil"); return; }
+  const e = spillerEl[id];
+  // Sikkerhet på lufta: aldri bytt fil i en spiller som spiller.
+  if (e && e.spiller) { melding(`${SPILLERE.find((s) => s.id === id).navn} spiller nå. Stopp den først – fila ble ikke byttet.`, "feil"); return; }
   melding("Laster og analyserer " + sti.split(/[\\/]/).pop() + " …");
   try { lastet(id, await kall("last_fil", { kanal: id, sti })); } catch (e) { visFeil(e); }
 }
@@ -662,7 +665,8 @@ if (!demo && T.webview) {
     const over = (pos) => { if (!pos) return null; const s = window.devicePixelRatio || 1; const el = document.elementFromPoint(pos.x / s, pos.y / s); return el && el.closest(".spiller"); };
     document.querySelectorAll(".spiller.slipp").forEach((x) => x.classList.remove("slipp"));
     if (p.type === "over" || p.type === "enter") { const sp = over(p.position); if (sp) sp.classList.add("slipp"); }
-    if (p.type === "drop") { const sp = over(p.position) || document.querySelector(".spiller"); if (sp && p.paths && p.paths[0]) lastFil(sp.dataset.kanal, p.paths[0]); }
+    // Bare slipp rett på en spiller teller – et bom-slipp gjør ingenting.
+    if (p.type === "drop") { const sp = over(p.position); if (sp && p.paths && p.paths[0]) lastFil(sp.dataset.kanal, p.paths[0]); else if (p.paths && p.paths.length) melding("Slipp fila rett på en spiller.", "feil"); }
   });
 }
 
@@ -715,11 +719,19 @@ function nullstillSpillere() {
     for (const n of ["bolge", "zoom"]) { const [ctx, W, H] = forbered(e.r(n)); ctx.clearRect(0, 0, W, H); }
   }
 }
-document.addEventListener("keydown", (ev) => {
-  if (ev.code !== "Space" || ev.target.matches("input, select, textarea, button")) return;
+// Mellomrom = spill/pause Spiller A. Fanges før knappene, så mellomrom aldri «trykker»
+// på en knapp som tilfeldigvis har fokus (f.eks. ON eller Stopp).
+const skriveFelt = (t) => t && t.matches && t.matches("input, select, textarea");
+window.addEventListener("keydown", (ev) => {
+  if (ev.code !== "Space" || skriveFelt(ev.target)) return;
+  ev.preventDefault(); ev.stopPropagation();
+  if (ev.repeat) return;
   const e = spillerEl.spillerA; if (!e || !e.lastet) return;
-  ev.preventDefault(); kall("spill", { kanal: "spillerA", spill: !e.spiller }).catch(visFeil);
-});
+  kall("spill", { kanal: "spillerA", spill: !e.spiller }).catch(visFeil);
+}, true);
+window.addEventListener("keyup", (ev) => { if (ev.code === "Space" && !skriveFelt(ev.target)) { ev.preventDefault(); ev.stopPropagation(); } }, true);
+// Knapper beholder ikke fokus etter musklikk (tastaturbrukere får fortsatt fokus med Tab).
+document.addEventListener("pointerup", (ev) => { const b = ev.target.closest && ev.target.closest("button"); if (b) setTimeout(() => b.blur(), 0); });
 
 // ================= Lydkort =================
 let lyd = false;
@@ -917,8 +929,14 @@ $("aapne-mappe").onclick = () => kall("aapne_opptaksmappe").catch(visFeil);
 byggSpillere();
 tikk();
 lastEnheter().then(async () => {
+  // Vinduet lastet på nytt mens lyden går: bygg opp alt slik det står nå.
   const aktiv = await kall("aktivt_oppsett").catch(() => null);
-  if (aktiv) { lyd = true; byggMikser(aktiv[1]); $("stopp-lyd").disabled = false; $("rec").disabled = false; }
+  if (aktiv) {
+    lyd = true; byggMikser(aktiv[1]); $("stopp-lyd").disabled = false; $("rec").disabled = false; $("start-lyd").textContent = "Start på nytt";
+    for (const [id, f] of Object.entries(aktiv[2] || {})) lastet(id, f);
+    if (masterStripe && typeof aktiv[3] === "number") { masterStripe.fader.visDb(aktiv[3]); settTekst(masterStripe.dbEl, dbTekst(aktiv[3])); }
+    melding("Koblet til lyden som går.", "ok");
+  }
 });
 oppdater();
 window.addEventListener("resize", () => { for (const id in spillerEl) tegnBolge(spillerEl[id]); });

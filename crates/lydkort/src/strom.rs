@@ -105,10 +105,10 @@ pub struct SpillerStatus {
     pub lokke: bool,
 }
 
-/// Lengden på de små inn/ut-rampene (5 ms) som hindrer klikk ved stopp og hopp.
+/// Lengden på de små inn/ut-rampene og kryssfadene (5 ms) som hindrer klikk ved stopp, hopp og løkke.
 const RAMPE: f32 = 1.0 / (0.005 * SAMPLERATE as f32);
 
-struct Spiller {
+pub(crate) struct Spiller {
     lyd: Blokk,
     pos: usize,
     spiller: bool,
@@ -119,21 +119,32 @@ struct Spiller {
     /// Klikkfri rampe: nåværende forsterkning og om den er på vei ned.
     rampe: f32,
     stopper: bool,
+    /// Kryssfade ved hopp og løkke: den gamle posisjonen fades ut mens den nye fades inn.
+    xf_pos: Option<usize>,
+    xf: f32,
+    /// Forsterkningen på forrige sample (til å avslutte pent).
+    sist_g: f32,
 }
 
 impl Spiller {
     fn ny(lyd: Blokk) -> Self {
         let slutt = lyd.lengde();
-        Spiller { lyd, pos: 0, spiller: false, lokke: false, start: 0, slutt, rampe: 1.0, stopper: false }
+        Spiller { lyd, pos: 0, spiller: false, lokke: false, start: 0, slutt, rampe: 1.0, stopper: false, xf_pos: None, xf: 0.0, sist_g: 1.0 }
     }
 
     fn spill(&mut self) {
-        if self.pos < self.start || self.pos >= self.slutt {
+        if self.spiller {
+            // Spiller allerede: et nytt trykk avbryter bare en stopp som er på vei.
+            self.stopper = false;
+            return;
+        }
+        if self.pos >= self.slutt.min(self.lyd.lengde()) {
             self.pos = self.start;
         }
-        // Fra et cue-punkt: full styrke med en gang (tight start). Midt i: myk inn.
+        // Fra startpunktet: full styrke med en gang (tight start). Midt i: myk inn.
         self.rampe = if self.pos == self.start { 1.0 } else { 0.0 };
         self.stopper = false;
+        self.xf_pos = None;
         self.spiller = true;
     }
 
@@ -143,10 +154,41 @@ impl Spiller {
         }
     }
 
+    fn stopp_naa(&mut self) {
+        self.spiller = false;
+        self.stopper = false;
+        self.rampe = 1.0;
+        self.xf_pos = None;
+        self.sist_g = 1.0;
+    }
+
     fn hopp(&mut self, til: usize) {
-        self.pos = til.min(self.lyd.lengde());
-        if self.spiller {
-            self.rampe = 0.0;
+        let til = til.min(self.lyd.lengde());
+        if self.spiller && !self.stopper {
+            self.xf_pos = Some(self.pos);
+            self.xf = 0.0;
+        }
+        self.pos = til;
+    }
+
+    fn sett_markorer(&mut self, start: usize, slutt: usize) {
+        let n = self.lyd.lengde();
+        let ny_start = start.min(n);
+        let ny_slutt = slutt.clamp(ny_start, n);
+        // Står spilleren, og startpunktet flyttes (eller spillehodet havner utenfor), gå til start.
+        if !self.spiller && (ny_start != self.start || self.pos < ny_start || self.pos > ny_slutt) {
+            self.pos = ny_start;
+        }
+        self.start = ny_start;
+        self.slutt = ny_slutt;
+    }
+
+    #[inline]
+    fn sample(&self, i: usize) -> (f32, f32) {
+        if i < self.lyd.lengde() {
+            (self.lyd.v[i], self.lyd.h[i])
+        } else {
+            (0.0, 0.0)
         }
     }
 
@@ -154,34 +196,48 @@ impl Spiller {
         if !self.spiller {
             return;
         }
-        let slutt = self.slutt.min(self.lyd.lengde());
+        let len = self.lyd.lengde();
+        let slutt = self.slutt.min(len);
+        let kan_lokke = self.lokke && slutt > self.start;
         for f in 0..b.lengde() {
-            if self.pos >= slutt {
-                if self.lokke && slutt > self.start {
-                    self.pos = self.start;
-                } else {
-                    self.spiller = false;
+            if self.pos >= slutt && !self.stopper {
+                if kan_lokke {
+                    self.hopp(self.start);
+                } else if self.sist_g < 0.01 || self.pos >= len {
+                    // Naturlig slutt: lyden er allerede rampet ned.
+                    self.stopp_naa();
                     return;
+                } else {
+                    // Sluttpunktet ble flyttet bak spillehodet: fade ut i stedet for å kutte.
+                    self.rampe = self.sist_g;
+                    self.stopper = true;
                 }
             }
-            // Rampe opp, eller ned ved stopp. Ned også rett før et stoppunkt midt i lyden.
             if self.stopper {
                 self.rampe -= RAMPE;
                 if self.rampe <= 0.0 {
-                    self.rampe = 1.0;
-                    self.stopper = false;
-                    self.spiller = false;
+                    self.stopp_naa();
                     return;
                 }
             } else if self.rampe < 1.0 {
                 self.rampe = (self.rampe + RAMPE).min(1.0);
             }
             let mut g = self.rampe;
-            if slutt < self.lyd.lengde() && !self.lokke {
+            if !kan_lokke && !self.stopper && self.pos < slutt && slutt < len {
                 g = g.min((slutt - self.pos) as f32 * RAMPE);
             }
-            b.v[f] = self.lyd.v[self.pos] * g;
-            b.h[f] = self.lyd.h[self.pos] * g;
+            let (mut v, mut h) = self.sample(self.pos);
+            if let Some(xp) = self.xf_pos {
+                let (gv, gh) = self.sample(xp);
+                let t = self.xf;
+                v = v * t + gv * (1.0 - t);
+                h = h * t + gh * (1.0 - t);
+                self.xf += RAMPE;
+                self.xf_pos = if self.xf >= 1.0 { None } else { Some(xp + 1) };
+            }
+            b.v[f] = v * g;
+            b.h[f] = h * g;
+            self.sist_g = g;
             self.pos += 1;
         }
     }
@@ -189,13 +245,34 @@ impl Spiller {
     fn status(&self) -> SpillerStatus {
         let sr = SAMPLERATE as f32;
         SpillerStatus {
-            pos: self.pos as f32 / sr,
+            pos: self.pos.min(self.lyd.lengde()) as f32 / sr,
             lengde: self.lyd.lengde() as f32 / sr,
             spiller: self.spiller,
             start: self.start as f32 / sr,
             slutt: self.slutt as f32 / sr,
             lokke: self.lokke,
         }
+    }
+}
+
+/// Slår av «denormale» tall i prosessoren for lyd-tråden. Bittesmå tall i stillhet
+/// kan ellers gjøre filtre og målere opptil ti ganger tregere.
+#[inline]
+fn denormaler_av() {
+    #[cfg(target_arch = "x86_64")]
+    #[allow(deprecated)]
+    // SAFETY: setter bare FTZ/DAZ-bitene i MXCSR for denne tråden.
+    unsafe {
+        use std::arch::x86_64::{_mm_getcsr, _mm_setcsr};
+        _mm_setcsr(_mm_getcsr() | 0x8040);
+    }
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: setter bare FZ-biten (24) i FPCR for denne tråden.
+    unsafe {
+        let mut fpcr: u64;
+        std::arch::asm!("mrs {}, fpcr", out(reg) fpcr);
+        fpcr |= 1 << 24;
+        std::arch::asm!("msr fpcr, {}", in(reg) fpcr);
     }
 }
 
@@ -349,6 +426,8 @@ impl Lydstrom {
         };
 
         let (tx, rx) = channel();
+        let (soppel_tx, soppel_rx) = channel::<Spiller>();
+        let _ = std::thread::Builder::new().name("lydkort-rydding".into()).spawn(move || for gammel in soppel_rx { drop(gammel) });
         let mut lyd = Lydtraad {
             motor,
             rx,
@@ -369,6 +448,8 @@ impl Lydstrom {
             flett: Vec::new(),
             runder_ut: 0,
             runder_inn: inn_runder.clone(),
+            soppel: soppel_tx,
+            siden_status: 0,
         };
         let strom_cfg = strom_konfig(&ut_cfg, oppsett.buffer);
         let st_feil = status.clone();
@@ -461,6 +542,10 @@ struct Lydtraad {
     flett: Vec<f32>,
     runder_ut: u64,
     runder_inn: Arc<std::sync::atomic::AtomicU64>,
+    /// Gamle spillere sendes hit og frigjøres utenfor lyd-tråden.
+    soppel: Sender<Spiller>,
+    /// Samples siden status sist ble oppdatert (oppdateres ca. 50 ganger i sekundet).
+    siden_status: usize,
 }
 
 impl Lydtraad {
@@ -474,7 +559,10 @@ impl Lydtraad {
                     let lokke = self.spillere.get(&id).map(|s| s.lokke).unwrap_or(false);
                     let mut s = Spiller::ny(lyd);
                     s.lokke = lokke;
-                    self.spillere.insert(id, s);
+                    if let Some(gammel) = self.spillere.insert(id, s) {
+                        // Å frigjøre en stor fil kan ta flere millisekunder: gjøres i en annen tråd.
+                        let _ = self.soppel.send(gammel);
+                    }
                 }
                 Kommando::Spill(id) => {
                     if let Some(s) = self.spillere.get_mut(&id) {
@@ -488,10 +576,8 @@ impl Lydtraad {
                 }
                 Kommando::Markorer(id, start, slutt) => {
                     if let Some(s) = self.spillere.get_mut(&id) {
-                        let n = s.lyd.lengde();
                         let sr = SAMPLERATE as f32;
-                        s.start = ((start.max(0.0) * sr) as usize).min(n);
-                        s.slutt = ((slutt.max(0.0) * sr) as usize).clamp(s.start, n);
+                        s.sett_markorer((start.max(0.0) * sr) as usize, (slutt.max(0.0) * sr) as usize);
                     }
                 }
                 Kommando::Hopp(id, sek) => {
@@ -593,8 +679,12 @@ impl Lydtraad {
             valgt.h.resize(n, 0.0);
         }
 
-        if let Ok(mut st) = self.status.try_lock() {
+        self.siden_status += n;
+        let status_naa = self.siden_status >= SAMPLERATE as usize / 50;
+        if let Some(mut st) = status_naa.then(|| self.status.try_lock().ok()).flatten() {
+            self.siden_status = 0;
             let n = self.motor.nivaamaalere();
+            self.motor.nullstill_maaletopp();
             st.topp = Some(match st.topp.take() {
                 Some(mut t) => {
                     t.slaa_sammen(&n);
@@ -648,6 +738,7 @@ where
     enhet.build_output_stream(
         cfg,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+            denormaler_av();
             let k = lyd.ut_kanaler;
             let n = data.len() / k;
             let b = lyd.lag(n);
@@ -701,6 +792,8 @@ mod tester {
             flett: Vec::new(),
             runder_ut: 0,
             runder_inn: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            soppel: channel().0,
+            siden_status: usize::MAX / 2,
         };
         (t, p, tx)
     }
@@ -822,5 +915,83 @@ mod tester {
             t.lag(64);
         }
         assert!(!t.spillere["spillerA"].spiller, "fader ned skal stoppe");
+    }
+
+    /// Største sprang mellom to samples – et klikk gir et stort sprang.
+    fn maks_sprang(x: &[f32]) -> f32 {
+        x.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max)
+    }
+
+    fn jevn_lyd() -> Blokk {
+        // Lav sinus: naturlige sprang er små (< 0,01), et klikk ville vært stort.
+        kjerne::testlyd::tone(50.0, -6.0, 3.0)
+    }
+
+    #[test]
+    fn sluttpunkt_bak_spillehodet_fader_ut_i_stedet_for_aa_kutte() {
+        let (mut t, _p, tx) = traad(false);
+        tx.send(Kommando::Last("spillerA".into(), jevn_lyd())).unwrap();
+        tx.send(Kommando::Spill("spillerA".into())).unwrap();
+        let mut ut = Vec::new();
+        for _ in 0..200 {
+            ut.extend(t.lag(64).v);
+        }
+        // Sett slutt 50 ms bak der spillehodet er nå (som når du trykker «Slutt» med forsinket visning).
+        tx.send(Kommando::Markorer("spillerA".into(), 0.0, 0.2)).unwrap();
+        for _ in 0..20 {
+            ut.extend(t.lag(64).v);
+        }
+        assert!(maks_sprang(&ut) < 0.02, "sprang {}", maks_sprang(&ut));
+        assert!(!t.spillere["spillerA"].spiller);
+    }
+
+    #[test]
+    fn loekke_og_nytt_spilltrykk_gir_ingen_dupp() {
+        let (mut t, _p, tx) = traad(false);
+        tx.send(Kommando::Last("spillerA".into(), jevn_lyd())).unwrap();
+        tx.send(Kommando::Spill("spillerA".into())).unwrap();
+        let mut ut = Vec::new();
+        for _ in 0..50 {
+            ut.extend(t.lag(64).v);
+        }
+        tx.send(Kommando::Lokke("spillerA".into(), true)).unwrap();
+        tx.send(Kommando::Spill("spillerA".into())).unwrap();
+        for _ in 0..50 {
+            ut.extend(t.lag(64).v);
+        }
+        assert!(maks_sprang(&ut) < 0.02, "sprang {}", maks_sprang(&ut));
+    }
+
+    #[test]
+    fn hopp_og_loekke_kryssfader() {
+        let (mut t, _p, tx) = traad(false);
+        tx.send(Kommando::Last("spillerA".into(), jevn_lyd())).unwrap();
+        tx.send(Kommando::Lokke("spillerA".into(), true)).unwrap();
+        tx.send(Kommando::Markorer("spillerA".into(), 0.0, 0.5)).unwrap();
+        tx.send(Kommando::Spill("spillerA".into())).unwrap();
+        let mut ut = Vec::new();
+        for i in 0..1000 {
+            if i == 100 {
+                tx.send(Kommando::Hopp("spillerA".into(), 0.123)).unwrap();
+            }
+            ut.extend(t.lag(64).v);
+        }
+        // 64 000 samples med en løkke på 0,5 s = flere løkker og ett hopp, uten klikk.
+        assert!(maks_sprang(&ut) < 0.03, "sprang {}", maks_sprang(&ut));
+        assert!(t.spillere["spillerA"].spiller);
+    }
+
+    #[test]
+    fn markorer_flytter_spillehodet_naar_spilleren_staar() {
+        let (mut t, _p, tx) = traad(false);
+        tx.send(Kommando::Last("spillerA".into(), jevn_lyd())).unwrap();
+        tx.send(Kommando::Markorer("spillerA".into(), 0.4, 2.0)).unwrap();
+        t.lag(64);
+        assert!((t.spillere["spillerA"].status().pos - 0.4).abs() < 1e-3);
+        // Hopp mens den står, og sett en markør som ikke endrer start: posisjonen beholdes.
+        tx.send(Kommando::Hopp("spillerA".into(), 1.0)).unwrap();
+        tx.send(Kommando::Markorer("spillerA".into(), 0.4, 2.5)).unwrap();
+        t.lag(64);
+        assert!((t.spillere["spillerA"].status().pos - 1.0).abs() < 1e-3);
     }
 }

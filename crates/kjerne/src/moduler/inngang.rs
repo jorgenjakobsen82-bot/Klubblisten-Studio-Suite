@@ -85,6 +85,15 @@ impl Hoypass {
     fn nullstill(&mut self) {
         self.z = [[0.0; 2]; 4];
     }
+
+    /// Setter bittesmå tilstandsverdier til null, så filteret ikke blir tregt i stillhet (denormaler).
+    fn rydd(&mut self) {
+        for z in self.z.iter_mut().flatten() {
+            if z.abs() < 1e-25 {
+                *z = 0.0;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -132,6 +141,7 @@ impl Inngangstrinn {
                 self.filter.steg(inn.v[i], 0);
                 self.filter.steg(inn.h[i], 1);
             }
+            self.filter.rydd();
             return;
         }
         let fortegn = if self.fase { -1.0 } else { 1.0 };
@@ -153,6 +163,7 @@ impl Inngangstrinn {
             ut.v[i] = if b == 0.0 { v } else if b == 1.0 { fv } else { v + (fv - v) * b };
             ut.h[i] = if b == 0.0 { h } else if b == 1.0 { fh } else { h + (fh - h) * b };
         }
+        self.filter.rydd();
     }
 }
 

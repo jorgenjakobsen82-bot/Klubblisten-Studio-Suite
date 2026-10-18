@@ -153,5 +153,9 @@ mod tester {
         assert_eq!(m2.hent("kanal/mik1/hpf_hz"), Some(Verdi::Tall(100.0)));
         assert_eq!(m2.hent("kanal/mik1/modus"), Some(Verdi::Valg(2)));
         assert_eq!(m2.hent("kanal/mik1/paa"), Some(Verdi::AvPaa(true)));
+        // Å laste et preset skal aldri starte eller stoppe spillere (fader-start).
+        let mut m2 = m2;
+        let h = m2.hendelser();
+        assert!(h.iter().all(|h| !matches!(h, crate::hendelse::Hendelse::FaderStart { .. } | crate::hendelse::Hendelse::FaderStopp { .. })), "{h:?}");
     }
 }
