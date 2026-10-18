@@ -278,12 +278,14 @@ async fn last_fil(kanal: String, sti: String, tilstand: State<'_, AppTilstand>) 
     let sekunder = fil.info.sekunder;
     let navn = fil.info.filnavn.clone();
     let svar = LastetFil { navn, sekunder, info: Some(fil.info), markorer: markorer.clone(), sti: Some(sti) };
-    let mut lyd = tilstand.lyd.lock().unwrap();
-    let Some(k) = lyd.as_mut() else { return Err("Lyden er ikke startet.".into()) };
     // Fil og cue-punkter godtas eller avvises samlet av lyd-tråden. Spiller spilleren
     // (også om den ble startet mens fila ble lest inn), endres ingenting.
-    k.styring.last_med_cue(&kanal, fil.lyd, markorer.start, markorer.slutt)?;
-    k.spillere.insert(kanal, svar.clone());
+    // Låsen slippes mens vi venter, så fadere og målere aldri fryser.
+    let styring = tilstand.lyd.lock().unwrap().as_ref().map(|k| k.styring.clone()).ok_or("Lyden er ikke startet.")?;
+    styring.last_med_cue(&kanal, fil.lyd, markorer.start, markorer.slutt)?;
+    if let Some(k) = tilstand.lyd.lock().unwrap().as_mut() {
+        k.spillere.insert(kanal, svar.clone());
+    }
     Ok(svar)
 }
 
@@ -315,10 +317,11 @@ fn testtone(kanal: String, tilstand: State<AppTilstand>) -> Result<LastetFil, St
     };
     let markorer = Markorer { start: 0.0, slutt: sekunder, intro: None, miks_ut: sekunder, manuell: false };
     let svar = LastetFil { navn: "Testtone".into(), sekunder, info: Some(info), markorer, sti: None };
-    let mut l = tilstand.lyd.lock().unwrap();
-    let Some(k) = l.as_mut() else { return Err("Lyden er ikke startet.".into()) };
-    k.styring.last_med_cue(&kanal, lyd, 0.0, sekunder)?;
-    k.spillere.insert(kanal, svar.clone());
+    let styring = tilstand.lyd.lock().unwrap().as_ref().map(|k| k.styring.clone()).ok_or("Lyden er ikke startet.")?;
+    styring.last_med_cue(&kanal, lyd, 0.0, sekunder)?;
+    if let Some(k) = tilstand.lyd.lock().unwrap().as_mut() {
+        k.spillere.insert(kanal, svar.clone());
+    }
     Ok(svar)
 }
 

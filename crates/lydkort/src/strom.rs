@@ -630,8 +630,15 @@ impl Lydtraad {
                     self.last(id, lyd, None);
                 }
                 Kommando::LastMedCue { kanal, lyd, start, slutt, svar } => {
-                    let ok = self.last(kanal, lyd, Some((start, slutt)));
-                    let _ = svar.send(ok);
+                    if self.spillere.get(&kanal).is_some_and(|s| s.spiller) {
+                        let _ = self.soppel.send(Spiller::ny(lyd));
+                        let _ = svar.send(false);
+                    } else if svar.send(true).is_ok() {
+                        self.last(kanal, lyd, Some((start, slutt)));
+                    } else {
+                        // Appen har gitt opp å vente (lydkortet hang): lastingen er avlyst.
+                        let _ = self.soppel.send(Spiller::ny(lyd));
+                    }
                 }
                 Kommando::Spill(id) => {
                     if let Some(s) = self.spillere.get_mut(&id) {
