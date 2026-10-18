@@ -175,7 +175,8 @@ fn sett(adresse: String, verdi: Verdi, tilstand: State<AppTilstand>) -> Result<(
     // Speil verdien, så vinduet viser riktig hvis det lastes på nytt.
     if let ["kanal", id, kontroll] = adresse.split('/').collect::<Vec<_>>().as_slice() {
         if let Some(info) = k.kanaler.iter_mut().find(|i| i.id == *id) {
-            if info.kontroller.contains_key(*kontroll) {
+            let sperret = *kontroll == "til_master" && info.privat;
+            if info.kontroller.contains_key(*kontroll) && !sperret {
                 info.kontroller.insert(kontroll.to_string(), verdi.clone());
             }
         }
@@ -279,6 +280,10 @@ async fn last_fil(kanal: String, sti: String, tilstand: State<'_, AppTilstand>) 
     let svar = LastetFil { navn, sekunder, info: Some(fil.info), markorer: markorer.clone(), sti: Some(sti) };
     let mut lyd = tilstand.lyd.lock().unwrap();
     let Some(k) = lyd.as_mut() else { return Err("Lyden er ikke startet.".into()) };
+    // Sjekk igjen etter dekodingen (den kan ta flere sekunder): spiller den nå, byttes ingenting.
+    if k.styring.status().spillere.get(&kanal).is_some_and(|s| s.spiller) {
+        return Err("Spilleren startet mens fila ble lest inn. Stopp den først – fila ble ikke byttet.".into());
+    }
     k.styring.send(Kommando::Last(kanal.clone(), fil.lyd));
     k.styring.send(Kommando::Markorer(kanal.clone(), markorer.start, markorer.slutt));
     k.spillere.insert(kanal, svar.clone());

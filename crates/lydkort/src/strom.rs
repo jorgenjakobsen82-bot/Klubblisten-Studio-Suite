@@ -119,9 +119,12 @@ pub(crate) struct Spiller {
     /// Klikkfri rampe: nåværende forsterkning og om den er på vei ned.
     rampe: f32,
     stopper: bool,
-    /// Kryssfade ved hopp og løkke: den gamle posisjonen fades ut mens den nye fades inn.
+    /// Kryssfade ved løkke: slutten av løkka fades ut mens starten fades inn (overlapp).
     xf_pos: Option<usize>,
     xf: f32,
+    /// Hopp som venter: lyden dukkes 5 ms, hopper, og kommer tilbake på 5 ms.
+    /// Tåler mange hopp på rad og hopp mens den stopper, uten klikk.
+    hopp_til: Option<usize>,
     /// Forsterkningen på forrige sample (til å avslutte pent).
     sist_g: f32,
 }
@@ -129,7 +132,7 @@ pub(crate) struct Spiller {
 impl Spiller {
     fn ny(lyd: Blokk) -> Self {
         let slutt = lyd.lengde();
-        Spiller { lyd, pos: 0, spiller: false, lokke: false, start: 0, slutt, rampe: 1.0, stopper: false, xf_pos: None, xf: 0.0, sist_g: 1.0 }
+        Spiller { lyd, pos: 0, spiller: false, lokke: false, start: 0, slutt, rampe: 1.0, stopper: false, xf_pos: None, xf: 0.0, hopp_til: None, sist_g: 1.0 }
     }
 
     fn spill(&mut self) {
@@ -145,6 +148,7 @@ impl Spiller {
         self.rampe = if self.pos == self.start { 1.0 } else { 0.0 };
         self.stopper = false;
         self.xf_pos = None;
+        self.hopp_til = None;
         self.spiller = true;
     }
 
@@ -159,16 +163,25 @@ impl Spiller {
         self.stopper = false;
         self.rampe = 1.0;
         self.xf_pos = None;
+        if let Some(til) = self.hopp_til.take() {
+            self.pos = til;
+        }
         self.sist_g = 1.0;
     }
 
     fn hopp(&mut self, til: usize) {
         let til = til.min(self.lyd.lengde());
-        if self.spiller && !self.stopper {
-            self.xf_pos = Some(self.pos);
-            self.xf = 0.0;
+        if self.spiller {
+            // Dukk, hopp, kom tilbake. Et nytt hopp underveis bytter bare målet.
+            self.hopp_til = Some(til);
+        } else {
+            self.pos = til;
         }
-        self.pos = til;
+    }
+
+    /// Lengden på kryssfaden i samples.
+    fn xf_lengde() -> usize {
+        (1.0 / RAMPE).ceil() as usize
     }
 
     fn sett_markorer(&mut self, start: usize, slutt: usize) {
@@ -198,26 +211,48 @@ impl Spiller {
         }
         let len = self.lyd.lengde();
         let slutt = self.slutt.min(len);
+        let xl = Self::xf_lengde();
         let kan_lokke = self.lokke && slutt > self.start;
+        // Lange nok løkker kryssfades med overlapp: starten fades inn mens de siste
+        // 5 ms før sluttpunktet fades ut. Da er det ekte lyd på begge sider – også
+        // når løkka går helt til slutten av fila.
+        let overlapp = kan_lokke && slutt - self.start > 2 * xl;
         for f in 0..b.lengde() {
-            if self.pos >= slutt && !self.stopper {
-                if kan_lokke {
-                    self.hopp(self.start);
-                } else if self.sist_g < 0.01 || self.pos >= len {
+            if kan_lokke && self.xf_pos.is_none() && self.hopp_til.is_none() {
+                let utlos = if overlapp { slutt - xl } else { slutt };
+                if self.pos >= utlos {
+                    if overlapp {
+                        self.xf_pos = Some(self.pos);
+                        self.xf = 0.0;
+                        self.pos = self.start;
+                    } else {
+                        // For kort til overlapp: dukk og hopp.
+                        self.hopp_til = Some(self.start);
+                    }
+                }
+            }
+            if !kan_lokke && self.pos >= slutt && !self.stopper && self.hopp_til.is_none() {
+                if self.sist_g < 0.01 || self.pos >= len {
                     // Naturlig slutt: lyden er allerede rampet ned.
                     self.stopp_naa();
                     return;
-                } else {
-                    // Sluttpunktet ble flyttet bak spillehodet: fade ut i stedet for å kutte.
-                    self.rampe = self.sist_g;
-                    self.stopper = true;
                 }
+                // Sluttpunktet ble flyttet bak spillehodet: fade ut i stedet for å kutte.
+                self.rampe = self.sist_g;
+                self.stopper = true;
             }
-            if self.stopper {
+            if self.stopper || self.hopp_til.is_some() {
                 self.rampe -= RAMPE;
                 if self.rampe <= 0.0 {
-                    self.stopp_naa();
-                    return;
+                    self.rampe = 0.0;
+                    if self.stopper {
+                        self.stopp_naa();
+                        return;
+                    }
+                    if let Some(til) = self.hopp_til.take() {
+                        self.pos = til;
+                        self.xf_pos = None;
+                    }
                 }
             } else if self.rampe < 1.0 {
                 self.rampe = (self.rampe + RAMPE).min(1.0);
@@ -556,6 +591,14 @@ impl Lydtraad {
                     let _ = self.motor.sett(&a, v);
                 }
                 Kommando::Last(id, lyd) => {
+                    // Siste sikring: en spiller som spiller på lufta byttes aldri ut.
+                    if self.spillere.get(&id).is_some_and(|s| s.spiller) {
+                        let _ = self.soppel.send(Spiller::ny(lyd));
+                        if let Ok(mut st) = self.status.try_lock() {
+                            st.feil = Some(format!("{id} spilte – fila ble ikke byttet"));
+                        }
+                        continue;
+                    }
                     let lokke = self.spillere.get(&id).map(|s| s.lokke).unwrap_or(false);
                     let mut s = Spiller::ny(lyd);
                     s.lokke = lokke;
@@ -709,9 +752,7 @@ impl Lydtraad {
             match h {
                 kjerne::hendelse::Hendelse::FaderStart { kanal } => {
                     if let Some(s) = self.spillere.get_mut(&kanal) {
-                        if !s.spiller {
-                            s.spill();
-                        }
+                        s.spill();
                     }
                 }
                 kjerne::hendelse::Hendelse::FaderStopp { kanal } => {
@@ -993,5 +1034,58 @@ mod tester {
         tx.send(Kommando::Markorer("spillerA".into(), 0.4, 2.5)).unwrap();
         t.lag(64);
         assert!((t.spillere["spillerA"].status().pos - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn loekke_helt_til_filslutt_klikker_ikke() {
+        let (mut t, _p, tx) = traad(false);
+        // 0,5 s sinus som ikke ender i null: et klikk ved løkka ville vært stort.
+        let lyd = kjerne::testlyd::tone(50.0, -6.0, 0.5);
+        tx.send(Kommando::Last("spillerA".into(), lyd)).unwrap();
+        tx.send(Kommando::Lokke("spillerA".into(), true)).unwrap();
+        tx.send(Kommando::Spill("spillerA".into())).unwrap();
+        let mut ut = Vec::new();
+        for _ in 0..2000 {
+            ut.extend(t.lag(64).v);
+        }
+        // Overgangen fra slutt til start kan gi et lite naturlig sprang i selve sinusen,
+        // men aldri et hopp til null.
+        assert!(maks_sprang(&ut) < 0.05, "sprang {}", maks_sprang(&ut));
+        assert!(ut[ut.len() / 2..].iter().filter(|x| x.abs() < 1e-6).count() < 200, "skal ikke ha hull");
+    }
+
+    #[test]
+    fn mange_hopp_paa_rad_og_hopp_under_stopp_klikker_ikke() {
+        let (mut t, _p, tx) = traad(false);
+        tx.send(Kommando::Last("spillerA".into(), jevn_lyd())).unwrap();
+        tx.send(Kommando::Spill("spillerA".into())).unwrap();
+        let mut ut = Vec::new();
+        for i in 0..400 {
+            if (100..104).contains(&i) {
+                tx.send(Kommando::Hopp("spillerA".into(), 0.1 * i as f32 / 50.0)).unwrap();
+            }
+            if i == 300 {
+                tx.send(Kommando::Stopp("spillerA".into())).unwrap();
+            }
+            if i == 300 {
+                tx.send(Kommando::Hopp("spillerA".into(), 2.0)).unwrap();
+            }
+            ut.extend(t.lag(16).v);
+        }
+        assert!(maks_sprang(&ut) < 0.02, "sprang {}", maks_sprang(&ut));
+        assert!(!t.spillere["spillerA"].spiller);
+        assert!((t.spillere["spillerA"].status().pos - 2.0).abs() < 1e-3, "hoppet utføres etter stopp");
+    }
+
+    #[test]
+    fn spillende_spiller_byttes_aldri_ut() {
+        let (mut t, _p, tx) = traad(false);
+        tx.send(Kommando::Last("spillerA".into(), jevn_lyd())).unwrap();
+        tx.send(Kommando::Spill("spillerA".into())).unwrap();
+        t.lag(64);
+        tx.send(Kommando::Last("spillerA".into(), kjerne::testlyd::stillhet(1.0))).unwrap();
+        t.lag(64);
+        let st = t.spillere["spillerA"].status();
+        assert!(st.spiller && (st.lengde - 3.0).abs() < 1e-3, "den gamle fila skal fortsatt spille");
     }
 }
