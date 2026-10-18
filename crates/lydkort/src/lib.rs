@@ -14,7 +14,7 @@ pub mod strom;
 pub use enheter::{liste, Enhet};
 pub use lydfil::last_lydfil;
 pub use opptak::{Buss, Opptak, OpptakInfo};
-pub use strom::{Inngangsvalg, Kommando, Lydoppsett, Lydstrom, Lytt, Status, Styring};
+pub use strom::{Inngangsvalg, Kommando, Lydoppsett, Lydstrom, Lytt, SpillerStatus, Status, Styring};
 
 /// Feil fra lydkort-laget, med norsk forklaring.
 #[derive(Debug)]

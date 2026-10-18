@@ -15,6 +15,7 @@ hound = "3.5"
 cpal = "0.15.3"
 ringbuf = "0.4"
 rubato = "0.15"
+symphonia = { version = "0.5", features = ["all"] }
 
 [profile.release]
 opt-level = 3

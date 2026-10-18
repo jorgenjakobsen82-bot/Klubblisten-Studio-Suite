@@ -2,3 +2,4 @@
 /utdata
 *.wav
 /crates/app/gen
+!crates/lydkort/testfiler/*.wav

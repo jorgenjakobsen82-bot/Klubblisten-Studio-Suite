@@ -64,6 +64,10 @@ pub enum Kommando {
     Stopp(String),
     /// Spill i løkke.
     Lokke(String, bool),
+    /// Start- og stoppunkt (cue) i sekunder.
+    Markorer(String, f32, f32),
+    /// Hopp til et sted i fila (sekunder).
+    Hopp(String, f32),
     StartOpptak(u64, crate::opptak::Buss, ringbuf::HeapProd<f32>, Arc<std::sync::atomic::AtomicU64>),
     StoppOpptak(u64),
 }
@@ -78,8 +82,8 @@ pub struct Status {
     pub inngang_tom: u64,
     /// Antall ganger inngangen ble justert for klokkeforskjell mellom lydkortene.
     pub klokkejustering: u64,
-    /// Spillernes posisjon i sekunder og om de spiller.
-    pub spillere: HashMap<String, (f32, f32, bool)>,
+    /// Spillernes posisjon, lengde, cue-punkter og om de spiller.
+    pub spillere: HashMap<String, SpillerStatus>,
     pub utgang_navn: String,
     pub inngang_navn: Option<String>,
     pub buffer_ms: f32,
@@ -91,11 +95,108 @@ pub struct Status {
     pub feil: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct SpillerStatus {
+    pub pos: f32,
+    pub lengde: f32,
+    pub spiller: bool,
+    pub start: f32,
+    pub slutt: f32,
+    pub lokke: bool,
+}
+
+/// Lengden på de små inn/ut-rampene (5 ms) som hindrer klikk ved stopp og hopp.
+const RAMPE: f32 = 1.0 / (0.005 * SAMPLERATE as f32);
+
 struct Spiller {
     lyd: Blokk,
     pos: usize,
     spiller: bool,
     lokke: bool,
+    /// Cue: der avspillingen starter og stopper.
+    start: usize,
+    slutt: usize,
+    /// Klikkfri rampe: nåværende forsterkning og om den er på vei ned.
+    rampe: f32,
+    stopper: bool,
+}
+
+impl Spiller {
+    fn ny(lyd: Blokk) -> Self {
+        let slutt = lyd.lengde();
+        Spiller { lyd, pos: 0, spiller: false, lokke: false, start: 0, slutt, rampe: 1.0, stopper: false }
+    }
+
+    fn spill(&mut self) {
+        if self.pos < self.start || self.pos >= self.slutt {
+            self.pos = self.start;
+        }
+        // Fra et cue-punkt: full styrke med en gang (tight start). Midt i: myk inn.
+        self.rampe = if self.pos == self.start { 1.0 } else { 0.0 };
+        self.stopper = false;
+        self.spiller = true;
+    }
+
+    fn stopp(&mut self) {
+        if self.spiller {
+            self.stopper = true;
+        }
+    }
+
+    fn hopp(&mut self, til: usize) {
+        self.pos = til.min(self.lyd.lengde());
+        if self.spiller {
+            self.rampe = 0.0;
+        }
+    }
+
+    fn fyll(&mut self, b: &mut Blokk) {
+        if !self.spiller {
+            return;
+        }
+        let slutt = self.slutt.min(self.lyd.lengde());
+        for f in 0..b.lengde() {
+            if self.pos >= slutt {
+                if self.lokke && slutt > self.start {
+                    self.pos = self.start;
+                } else {
+                    self.spiller = false;
+                    return;
+                }
+            }
+            // Rampe opp, eller ned ved stopp. Ned også rett før et stoppunkt midt i lyden.
+            if self.stopper {
+                self.rampe -= RAMPE;
+                if self.rampe <= 0.0 {
+                    self.rampe = 1.0;
+                    self.stopper = false;
+                    self.spiller = false;
+                    return;
+                }
+            } else if self.rampe < 1.0 {
+                self.rampe = (self.rampe + RAMPE).min(1.0);
+            }
+            let mut g = self.rampe;
+            if slutt < self.lyd.lengde() && !self.lokke {
+                g = g.min((slutt - self.pos) as f32 * RAMPE);
+            }
+            b.v[f] = self.lyd.v[self.pos] * g;
+            b.h[f] = self.lyd.h[self.pos] * g;
+            self.pos += 1;
+        }
+    }
+
+    fn status(&self) -> SpillerStatus {
+        let sr = SAMPLERATE as f32;
+        SpillerStatus {
+            pos: self.pos as f32 / sr,
+            lengde: self.lyd.lengde() as f32 / sr,
+            spiller: self.spiller,
+            start: self.start as f32 / sr,
+            slutt: self.slutt as f32 / sr,
+            lokke: self.lokke,
+        }
+    }
 }
 
 /// En kjørende lydstrøm. Lyden stopper når denne slippes.
@@ -370,19 +471,32 @@ impl Lydtraad {
                     let _ = self.motor.sett(&a, v);
                 }
                 Kommando::Last(id, lyd) => {
-                    self.spillere.insert(id, Spiller { lyd, pos: 0, spiller: false, lokke: false });
+                    let lokke = self.spillere.get(&id).map(|s| s.lokke).unwrap_or(false);
+                    let mut s = Spiller::ny(lyd);
+                    s.lokke = lokke;
+                    self.spillere.insert(id, s);
                 }
                 Kommando::Spill(id) => {
                     if let Some(s) = self.spillere.get_mut(&id) {
-                        if s.pos >= s.lyd.lengde() {
-                            s.pos = 0;
-                        }
-                        s.spiller = true;
+                        s.spill();
                     }
                 }
                 Kommando::Stopp(id) => {
                     if let Some(s) = self.spillere.get_mut(&id) {
-                        s.spiller = false;
+                        s.stopp();
+                    }
+                }
+                Kommando::Markorer(id, start, slutt) => {
+                    if let Some(s) = self.spillere.get_mut(&id) {
+                        let n = s.lyd.lengde();
+                        let sr = SAMPLERATE as f32;
+                        s.start = ((start.max(0.0) * sr) as usize).min(n);
+                        s.slutt = ((slutt.max(0.0) * sr) as usize).clamp(s.start, n);
+                    }
+                }
+                Kommando::Hopp(id, sek) => {
+                    if let Some(s) = self.spillere.get_mut(&id) {
+                        s.hopp((sek.max(0.0) * SAMPLERATE as f32) as usize);
                     }
                 }
                 Kommando::Lokke(id, p) => {
@@ -445,21 +559,7 @@ impl Lydtraad {
         // Spillerne
         for (id, s) in self.spillere.iter_mut() {
             let mut b = Blokk::stille(n);
-            if s.spiller {
-                for f in 0..n {
-                    if s.pos >= s.lyd.lengde() {
-                        if s.lokke && s.lyd.lengde() > 0 {
-                            s.pos = 0;
-                        } else {
-                            s.spiller = false;
-                            break;
-                        }
-                    }
-                    b.v[f] = s.lyd.v[s.pos];
-                    b.h[f] = s.lyd.h[s.pos];
-                    s.pos += 1;
-                }
-            }
+            s.fyll(&mut b);
             inn.insert(id.clone(), b);
         }
 
@@ -497,16 +597,7 @@ impl Lydtraad {
             let n = self.motor.nivaamaalere();
             st.topp = Some(match st.topp.take() {
                 Some(mut t) => {
-                    for (k, ny) in t.kanaler.iter_mut().zip(&n.kanaler) {
-                        if k.0 == ny.0 {
-                            k.1 = k.1.max(ny.1);
-                            k.2 = k.2.max(ny.2);
-                        }
-                    }
-                    if t.kanaler.len() != n.kanaler.len() {
-                        t.kanaler = n.kanaler.clone();
-                    }
-                    t.master = (t.master.0.max(n.master.0), t.master.1.max(n.master.1));
+                    t.slaa_sammen(&n);
                     t
                 }
                 None => n.clone(),
@@ -520,11 +611,27 @@ impl Lydtraad {
             st.spillere = self
                 .spillere
                 .iter()
-                .map(|(id, s)| (id.clone(), (s.pos as f32 / SAMPLERATE as f32, s.lyd.lengde() as f32 / SAMPLERATE as f32, s.spiller)))
+                .map(|(id, s)| (id.clone(), s.status()))
                 .collect();
         }
-        // Hendelser leses av appen senere; tøm dem så de ikke hoper seg opp.
-        self.motor.hendelser();
+        // Fader-start: ON-knappen eller faderen starter og stopper spilleren på kanalen.
+        for h in self.motor.hendelser() {
+            match h {
+                kjerne::hendelse::Hendelse::FaderStart { kanal } => {
+                    if let Some(s) = self.spillere.get_mut(&kanal) {
+                        if !s.spiller {
+                            s.spill();
+                        }
+                    }
+                }
+                kjerne::hendelse::Hendelse::FaderStopp { kanal } => {
+                    if let Some(s) = self.spillere.get_mut(&kanal) {
+                        s.stopp();
+                    }
+                }
+                _ => {}
+            }
+        }
         valgt
     }
 }
@@ -570,6 +677,7 @@ mod tester {
         let mut m = Motor::ny();
         m.legg_til_kanal(KanalOppsett::ny("mik1", "Mikrofon 1", Kanaltype::Mikrofon)).unwrap();
         m.sett("kanal/mik1/fader", Verdi::Tall(0.0)).unwrap();
+        m.sett("kanal/mik1/paa", Verdi::AvPaa(true)).unwrap();
         m.legg_til_kanal(KanalOppsett::ny("spillerA", "Spiller A", Kanaltype::Spiller)).unwrap();
         let (p, c) = HeapRb::<f32>::new(8192 * 2).split();
         let (tx, rx) = channel();
@@ -652,5 +760,67 @@ mod tester {
         assert_eq!(info.tapt, 0);
         let lest = kjerne::testlyd::les_wav(&sti).unwrap();
         assert_eq!(lest.utsnitt(0, lyd.lengde()), lyd, "opptaket skal være nøyaktig det som ble spilt");
+    }
+
+    #[test]
+    fn cue_punkter_og_hopp() {
+        let (mut t, _p, tx) = traad(false);
+        // 1 sekund lyd der hver sample har verdien av sin egen posisjon (lett å sjekke).
+        let n = 48_000;
+        let lyd = Blokk { v: (0..n).map(|i| i as f32 / n as f32).collect(), h: vec![0.5; n] };
+        tx.send(Kommando::Last("spillerA".into(), lyd)).unwrap();
+        tx.send(Kommando::Markorer("spillerA".into(), 0.25, 0.5)).unwrap();
+        tx.send(Kommando::Spill("spillerA".into())).unwrap();
+        t.lag(64);
+        // Starter nøyaktig på startpunktet, med full styrke.
+        let st = t.spillere["spillerA"].status();
+        assert!((st.start - 0.25).abs() < 1e-4 && st.spiller);
+        let mut ut = Vec::new();
+        for _ in 0..400 {
+            ut.extend(t.lag(64).h);
+        }
+        let spilt = ut.iter().filter(|x| **x != 0.0).count();
+        assert!((spilt as i64 - 12_000 + 64).abs() < 300, "spilte {spilt} samples, skal være ca. 0,25 s");
+        assert!(!t.spillere["spillerA"].spiller, "stopper ved stoppunktet");
+        // Hopp
+        tx.send(Kommando::Hopp("spillerA".into(), 0.4)).unwrap();
+        t.lag(64);
+        assert!((t.spillere["spillerA"].status().pos - 0.4).abs() < 0.01);
+    }
+
+    #[test]
+    fn stopp_er_klikkfri() {
+        let (mut t, _p, tx) = traad(false);
+        tx.send(Kommando::Last("spillerA".into(), Blokk { v: vec![0.5; 48_000], h: vec![0.5; 48_000] })).unwrap();
+        tx.send(Kommando::Spill("spillerA".into())).unwrap();
+        for _ in 0..20 {
+            t.lag(64);
+        }
+        tx.send(Kommando::Stopp("spillerA".into())).unwrap();
+        let mut ut = Vec::new();
+        for _ in 0..10 {
+            ut.extend(t.lag(64).v);
+        }
+        // Ingen sprang større enn rampen tillater (ett klikk ville vært et hopp på 0,5).
+        let maks_sprang = ut.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0f32, f32::max);
+        assert!(maks_sprang < 0.01, "sprang {maks_sprang}");
+        assert!(!t.spillere["spillerA"].spiller);
+    }
+
+    #[test]
+    fn fader_start_starter_og_stopper_spilleren() {
+        let (mut t, _p, tx) = traad(false);
+        tx.send(Kommando::Last("spillerA".into(), Blokk { v: vec![0.5; 48_000], h: vec![0.5; 48_000] })).unwrap();
+        tx.send(Kommando::Sett("kanal/spillerA/paa".into(), Verdi::AvPaa(false))).unwrap();
+        t.lag(64);
+        assert!(!t.spillere["spillerA"].spiller);
+        tx.send(Kommando::Sett("kanal/spillerA/paa".into(), Verdi::AvPaa(true))).unwrap();
+        t.lag(64);
+        assert!(t.spillere["spillerA"].spiller, "ON skal starte spilleren");
+        tx.send(Kommando::Sett("kanal/spillerA/fader".into(), Verdi::Tall(-200.0))).unwrap();
+        for _ in 0..10 {
+            t.lag(64);
+        }
+        assert!(!t.spillere["spillerA"].spiller, "fader ned skal stoppe");
     }
 }

@@ -35,11 +35,38 @@ struct KanalInfo {
     #[serde(rename = "type")]
     kanaltype: String,
     privat: bool,
-    til_master: bool,
-    til_dj_ren: bool,
-    til_studio: bool,
-    fader: f32,
     spiller: bool,
+    /// Alle kanalens kontroller slik de står nå (fader, paa, trim, pan, hpf …).
+    kontroller: std::collections::BTreeMap<String, Verdi>,
+}
+
+const KANALKONTROLLER: [&str; 14] =
+    ["fader", "trim", "mute", "solo", "pan", "til_master", "til_studio", "til_dj_ren", "paa", "faderstart", "hpf", "hpf_hz", "fase", "modus"];
+
+fn kanalinfo(m: &Motor, id: &str, hvem: &str, spiller: bool) -> KanalInfo {
+    let k = m.kanal(id).expect("kanal");
+    KanalInfo {
+        id: id.into(),
+        navn: k.oppsett.navn.clone(),
+        hvem: hvem.into(),
+        kanaltype: k.oppsett.kanaltype.navn().into(),
+        privat: k.oppsett.privat,
+        spiller,
+        kontroller: KANALKONTROLLER
+            .iter()
+            .filter_map(|c| {
+                m.hent(&format!("kanal/{id}/{c}")).map(|v| {
+                    // JSON tåler ikke −∞: send −200 dB.
+                    let v = match v {
+                        Verdi::Tall(t) if !t.is_finite() => Verdi::Tall(-200.0),
+                        Verdi::Valg(n) => Verdi::Tall(n as f32),
+                        v => v,
+                    };
+                    (c.to_string(), v)
+                })
+            })
+            .collect(),
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -61,39 +88,21 @@ fn enheter() -> Result<Vec<lydkort::Enhet>, String> {
 
 fn bygg_motor(med_inngang: bool) -> (Motor, Vec<KanalInfo>, Vec<Inngangsvalg>) {
     let mut m = Motor::ny();
-    let mut info = Vec::new();
+    let mut kanaler: Vec<(&str, &str, bool)> = Vec::new();
     let mut innganger = Vec::new();
-    let mut legg_til = |m: &mut Motor, o: KanalOppsett, hvem: &str, fader: f32, spiller: bool| {
-        m.legg_til_kanal(o.clone()).expect("kanal");
-        m.sett(&format!("kanal/{}/fader", o.id), Verdi::Tall(fader)).expect("fader");
-        info.push(KanalInfo {
-            id: o.id.clone(),
-            navn: o.navn.clone(),
-            hvem: hvem.into(),
-            kanaltype: match o.kanaltype {
-                Kanaltype::Mikrofon => "MIC",
-                Kanaltype::LinjeStereo => "LINJE",
-                Kanaltype::Spiller => "SPILLER",
-                Kanaltype::AppLyd => "APP",
-                Kanaltype::Retur => "RETUR",
-            }
-            .into(),
-            privat: o.privat,
-            til_master: o.til_master && !o.privat,
-            til_dj_ren: o.til_dj_ren,
-            til_studio: o.til_studio,
-            fader,
-            spiller,
-        });
-    };
     if med_inngang {
-        legg_til(&mut m, KanalOppsett::ny("mik1", "Mikrofon 1", Kanaltype::Mikrofon), "Inngang 1", -200.0, false);
-        legg_til(&mut m, KanalOppsett::ny("inn2", "Inngang 2", Kanaltype::Mikrofon), "Inngang 2", -200.0, false);
+        m.legg_til_kanal(KanalOppsett::ny("mik1", "Mikrofon 1", Kanaltype::Mikrofon)).expect("kanal");
+        m.legg_til_kanal(KanalOppsett::ny("inn2", "Inngang 2", Kanaltype::Mikrofon)).expect("kanal");
+        kanaler.push(("mik1", "Inngang 1", false));
+        kanaler.push(("inn2", "Inngang 2", false));
         innganger.push(Inngangsvalg { kanal_id: "mik1".into(), forste: 1, stereo: false });
         innganger.push(Inngangsvalg { kanal_id: "inn2".into(), forste: 2, stereo: false });
     }
-    legg_til(&mut m, KanalOppsett::ny("spillerA", "Spiller A", Kanaltype::Spiller), "Avvikling", 0.0, true);
-    legg_til(&mut m, KanalOppsett::ny("jingler", "Jingler", Kanaltype::Spiller), "Lydknapper", 0.0, true);
+    m.legg_til_kanal(KanalOppsett::ny("spillerA", "Spiller A", Kanaltype::Spiller)).expect("kanal");
+    m.legg_til_kanal(KanalOppsett::ny("jingler", "Jingler", Kanaltype::Spiller)).expect("kanal");
+    kanaler.push(("spillerA", "Avvikling", true));
+    kanaler.push(("jingler", "Lydknapper", true));
+    let info = kanaler.iter().map(|(id, hvem, sp)| kanalinfo(&m, id, hvem, *sp)).collect();
     (m, info, innganger)
 }
 
@@ -167,19 +176,97 @@ fn sett(adresse: String, verdi: Verdi, tilstand: State<AppTilstand>) -> Result<(
 struct LastetFil {
     navn: String,
     sekunder: f32,
+    info: Option<lydkort::lydfil::Lydinfo>,
+    markorer: Markorer,
+    sti: Option<String>,
 }
 
-/// Kjøres utenfor hovedtråden, så vinduet ikke fryser mens en stor fil lastes.
+/// Cue-punktene for én fil, lagret så de huskes neste gang fila lastes.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct Markorer {
+    start: f32,
+    slutt: f32,
+    /// Der vokalen begynner (settes av deg).
+    intro: Option<f32>,
+    miks_ut: f32,
+    /// true = satt for hånd (ikke autocue).
+    #[serde(default)]
+    manuell: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CueLagret {
+    storrelse: u64,
+    endret: u64,
+    markorer: Markorer,
+}
+
+fn cue_fil() -> PathBuf {
+    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("Klubblisten Studio").join("cue-punkter.json")
+}
+
+fn fil_id(sti: &std::path::Path) -> Option<(u64, u64)> {
+    let m = std::fs::metadata(sti).ok()?;
+    let endret = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    Some((m.len(), endret))
+}
+
+fn les_cue_db() -> std::collections::BTreeMap<String, CueLagret> {
+    std::fs::read_to_string(cue_fil()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn hent_markorer(sti: &std::path::Path) -> Option<Markorer> {
+    let (storrelse, endret) = fil_id(sti)?;
+    let db = les_cue_db();
+    let l = db.get(&sti.display().to_string())?;
+    (l.storrelse == storrelse && l.endret == endret).then(|| l.markorer.clone())
+}
+
+#[tauri::command]
+fn lagre_markorer(kanal: String, sti: String, markorer: Markorer, tilstand: State<AppTilstand>) -> Result<(), String> {
+    let p = PathBuf::from(&sti);
+    if let Some((storrelse, endret)) = fil_id(&p) {
+        let mut db = les_cue_db();
+        db.insert(sti.clone(), CueLagret { storrelse, endret, markorer: markorer.clone() });
+        let fil = cue_fil();
+        if let Some(m) = fil.parent() {
+            let _ = std::fs::create_dir_all(m);
+        }
+        // Skriv til midlertidig fil og bytt, så databasen aldri blir halvskrevet.
+        let tmp = fil.with_extension("tmp");
+        std::fs::write(&tmp, serde_json::to_string_pretty(&db).map_err(feil)?).map_err(feil)?;
+        std::fs::rename(&tmp, &fil).map_err(feil)?;
+    }
+    med_styring(&tilstand, |s| {
+        s.send(Kommando::Markorer(kanal, markorer.start, markorer.slutt));
+        Ok(())
+    })
+}
+
+/// Kjøres utenfor hovedtråden, så vinduet ikke fryser mens en stor fil lastes og analyseres.
 #[tauri::command]
 async fn last_fil(kanal: String, sti: String, tilstand: State<'_, AppTilstand>) -> Result<LastetFil, String> {
     let p = PathBuf::from(&sti);
-    let lyd = lydkort::last_lydfil(&p).map_err(feil)?;
-    let sekunder = lyd.lengde() as f32 / kjerne::SAMPLERATE as f32;
+    let p2 = p.clone();
+    let fil = tauri::async_runtime::spawn_blocking(move || lydkort::lydfil::last_med_info(&p2)).await.map_err(feil)?.map_err(feil)?;
+    let a = &fil.info.autocue;
+    let markorer = hent_markorer(&p).unwrap_or(Markorer { start: a.start, slutt: a.slutt, intro: None, miks_ut: a.miks_ut, manuell: false });
+    let sekunder = fil.info.sekunder;
+    let navn = fil.info.filnavn.clone();
     med_styring(&tilstand, |s| {
-        s.send(Kommando::Last(kanal, lyd));
+        s.send(Kommando::Last(kanal.clone(), fil.lyd));
+        s.send(Kommando::Markorer(kanal, markorer.start, markorer.slutt));
         Ok(())
     })?;
-    Ok(LastetFil { navn: p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(sti), sekunder })
+    Ok(LastetFil { navn, sekunder, info: Some(fil.info), markorer, sti: Some(sti) })
+}
+
+#[tauri::command]
+fn hopp(kanal: String, sek: f32, tilstand: State<AppTilstand>) -> Result<(), String> {
+    med_styring(&tilstand, |s| {
+        s.send(Kommando::Hopp(kanal, sek));
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -190,11 +277,22 @@ fn testtone(kanal: String, tilstand: State<AppTilstand>) -> Result<LastetFil, St
         lyd.h.extend_from_slice(&del.h);
     }
     let sekunder = lyd.lengde() as f32 / kjerne::SAMPLERATE as f32;
+    let info = lydkort::lydfil::Lydinfo {
+        filnavn: "Testtone".into(),
+        tittel: Some("Testtone 1 kHz −18 dBFS".into()),
+        artist: Some("så venstre og høyre".into()),
+        format: "Generert · 48 kHz · stereo".into(),
+        sekunder,
+        lufs: None,
+        autocue: lydkort::lydfil::autocue(&lyd),
+        bolge: lydkort::lydfil::bolgeform(&lyd),
+    };
+    let markorer = Markorer { start: 0.0, slutt: sekunder, intro: None, miks_ut: sekunder, manuell: false };
     med_styring(&tilstand, |s| {
         s.send(Kommando::Last(kanal, lyd));
         Ok(())
     })?;
-    Ok(LastetFil { navn: "Testtone 1 kHz −18 dBFS + venstre/høyre".into(), sekunder })
+    Ok(LastetFil { navn: "Testtone".into(), sekunder, info: Some(info), markorer, sti: None })
 }
 
 #[tauri::command]
@@ -215,9 +313,9 @@ struct Tilstandsrapport {
     inngang: Option<String>,
     buffer_ms: f32,
     on_air: bool,
-    kanaler: Vec<(String, Option<f32>, Option<f32>)>,
-    master: (Option<f32>, Option<f32>),
-    spillere: std::collections::HashMap<String, (f32, f32, bool)>,
+    kanaler: Vec<kjerne::motor::KanalMaaling>,
+    master: Option<kjerne::motor::KanalMaaling>,
+    spillere: std::collections::HashMap<String, lydkort::strom::SpillerStatus>,
     inngang_tom: u64,
     opptak: Vec<(String, f64, String)>,
     runder_ut: u64,
@@ -225,9 +323,6 @@ struct Tilstandsrapport {
     feil: Option<String>,
 }
 
-fn endelig(x: f32) -> Option<f32> {
-    x.is_finite().then_some(x)
-}
 
 #[tauri::command]
 async fn status(tilstand: State<'_, AppTilstand>) -> Result<Tilstandsrapport, String> {
@@ -245,7 +340,7 @@ fn status_naa(tilstand: &State<'_, AppTilstand>) -> Tilstandsrapport {
             buffer_ms: 0.0,
             on_air: false,
             kanaler: vec![],
-            master: (None, None),
+            master: None,
             spillere: Default::default(),
             inngang_tom: 0,
             opptak: vec![],
@@ -262,8 +357,8 @@ fn status_naa(tilstand: &State<'_, AppTilstand>) -> Tilstandsrapport {
         inngang: st.inngang_navn,
         buffer_ms: st.buffer_ms,
         on_air: st.on_air,
-        kanaler: m.as_ref().map(|m| m.kanaler.iter().map(|(id, v, h)| (id.clone(), endelig(*v), endelig(*h))).collect()).unwrap_or_default(),
-        master: m.as_ref().map(|m| (endelig(m.master.0), endelig(m.master.1))).unwrap_or((None, None)),
+        kanaler: m.as_ref().map(|m| m.kanaler.clone()).unwrap_or_default(),
+        master: m.map(|m| m.master),
         spillere: st.spillere,
         inngang_tom: st.inngang_tom,
         opptak: opptak.iter().map(|o| (o.buss.navn().to_string(), o.sekunder(), o.sti.display().to_string())).collect(),
@@ -352,6 +447,8 @@ fn main() {
             start_opptak,
             stopp_opptak,
             aapne_opptaksmappe,
+            hopp,
+            lagre_markorer,
             aktivt_oppsett
         ])
         .run(tauri::generate_context!())

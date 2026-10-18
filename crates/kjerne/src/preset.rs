@@ -50,7 +50,7 @@ impl std::fmt::Display for Presetfeil {
 
 impl std::error::Error for Presetfeil {}
 
-const KANALKONTROLLER: [&str; 5] = ["fader", "trim", "mute", "solo", "pan"];
+const KANALKONTROLLER: [&str; 11] = ["fader", "trim", "mute", "solo", "pan", "paa", "faderstart", "hpf", "hpf_hz", "fase", "modus"];
 
 impl StudioPreset {
     /// Lager en preset av motorens nåværende tilstand.
@@ -111,6 +111,8 @@ impl StudioPreset {
 fn json_trygg(v: Verdi) -> Verdi {
     match v {
         Verdi::Tall(t) if !t.is_finite() => Verdi::Tall(if t > 0.0 { 10.0 } else { -200.0 }),
+        // Valg lagres som tall, så fila leses likt tilbake.
+        Verdi::Valg(n) => Verdi::Tall(n as f32),
         annen => annen,
     }
 }
@@ -130,6 +132,10 @@ mod tester {
         m.sett("kanal/mik1/fader", Verdi::Tall(-4.0)).unwrap();
         m.sett("kanal/mik1/trim", Verdi::Tall(4.5)).unwrap();
         m.sett("kanal/spot/pan", Verdi::Tall(-0.25)).unwrap();
+        m.sett("kanal/mik1/hpf", Verdi::AvPaa(true)).unwrap();
+        m.sett("kanal/mik1/hpf_hz", Verdi::Tall(100.0)).unwrap();
+        m.sett("kanal/mik1/modus", Verdi::Tall(2.0)).unwrap();
+        m.sett("kanal/mik1/paa", Verdi::AvPaa(true)).unwrap();
 
         let p = StudioPreset::fra_motor("Live torsdag", &m, BTreeMap::new());
         let dir = std::env::temp_dir().join("studio-suite-presettest");
@@ -143,5 +149,9 @@ mod tester {
         assert_eq!(m2.hent("kanal/mik1/fader"), Some(Verdi::Tall(-4.0)));
         assert_eq!(m2.hent("kanal/mik1/trim"), Some(Verdi::Tall(4.5)));
         assert_eq!(m2.hent("kanal/spot/til_master"), Some(Verdi::AvPaa(false)));
+        assert_eq!(m2.hent("kanal/mik1/hpf"), Some(Verdi::AvPaa(true)));
+        assert_eq!(m2.hent("kanal/mik1/hpf_hz"), Some(Verdi::Tall(100.0)));
+        assert_eq!(m2.hent("kanal/mik1/modus"), Some(Verdi::Valg(2)));
+        assert_eq!(m2.hent("kanal/mik1/paa"), Some(Verdi::AvPaa(true)));
     }
 }

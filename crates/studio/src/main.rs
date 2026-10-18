@@ -109,11 +109,11 @@ fn maalere(s: &Styring, stopp: &AtomicBool, vis: &[&str]) {
             let mut verdier: Vec<(String, f32)> = vis
                 .iter()
                 .map(|id| {
-                    let db = m.kanaler.iter().find(|k| k.0 == *id).map(|k| k.1.max(k.2)).unwrap_or(f32::NEG_INFINITY);
+                    let db = m.kanaler.iter().find(|k| k.id == *id).map(|k| k.topp[0].max(k.topp[1])).unwrap_or(f32::NEG_INFINITY);
                     (id.to_string(), db)
                 })
                 .collect();
-            verdier.push(("Master".into(), m.master.0.max(m.master.1)));
+            verdier.push(("Master".into(), m.master.topp[0].max(m.master.topp[1])));
             for (i, (navn, db)) in verdier.iter().enumerate() {
                 let db = if db.is_finite() { *db } else { -90.0 };
                 holdt[i] = if db > holdt[i] { db } else { (holdt[i] - 1.5).max(db).max(-90.0) };
@@ -122,7 +122,8 @@ fn maalere(s: &Styring, stopp: &AtomicBool, vis: &[&str]) {
                 linje.push_str(&format!("{navn} [{}{}] {tekst}  ", "█".repeat(fylt), " ".repeat(20 - fylt)));
             }
         }
-        for (id, (pos, len, _)) in &st.spillere {
+        for (id, sp) in &st.spillere {
+            let (pos, len) = (sp.pos, sp.lengde);
             linje.push_str(&format!("{id} {:.0}/{:.0} s  ", pos, len));
         }
         if st.on_air {
@@ -171,7 +172,7 @@ fn vent_paa_enter(s: &Lydstrom, mikrofon: Option<&str>, vis: &[&str]) {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // Stopp av seg selv når spilleren er ferdig (og ikke looper).
                     let st = s.status();
-                    if mikrofon.is_none() && !st.spillere.is_empty() && st.spillere.values().all(|(_, _, spiller)| !spiller) {
+                    if mikrofon.is_none() && !st.spillere.is_empty() && st.spillere.values().all(|sp| !sp.spiller) {
                         stopp.store(true, Ordering::Relaxed);
                         break;
                     }
@@ -225,6 +226,7 @@ fn mikrofon(args: &[String]) {
     let mut m = Motor::ny();
     m.legg_til_kanal(KanalOppsett::ny("mik1", "Mikrofon 1", Kanaltype::Mikrofon)).unwrap();
     m.sett("kanal/mik1/fader", Verdi::Tall(0.0)).unwrap();
+    m.sett("kanal/mik1/paa", Verdi::AvPaa(true)).unwrap();
     let musikk = arg(args, "--musikk");
     if musikk.is_some() {
         m.legg_til_kanal(KanalOppsett::ny("spillerA", "Spiller A", Kanaltype::Spiller)).unwrap();

@@ -14,6 +14,10 @@ pub enum Hendelse {
     PresetLastet { navn: String },
     Klipping { sted: String },
     KontrollEndret { adresse: String },
+    /// Kanalen ble slått på / faderen skjøvet opp (starter spilleren hvis fader-start er på).
+    FaderStart { kanal: String },
+    /// Kanalen ble slått av / faderen tatt ned.
+    FaderStopp { kanal: String },
 }
 
 /// Enkel hendelsesbuss. Hendelser samles og hentes ut av den som lytter.

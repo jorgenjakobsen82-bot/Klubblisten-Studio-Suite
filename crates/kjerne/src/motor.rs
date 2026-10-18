@@ -13,7 +13,7 @@ use crate::hendelse::{Hendelse, Hendelsesbuss};
 use crate::kontroll::{Kontroll, Kontrollfeil, Kontrolltype, RegistrertKontroll, Verdi};
 use crate::lyd::{db_til_lin, Blokk, Glatter, BLOKKSTORRELSE, SAMPLERATE};
 use crate::modul::Modul;
-use crate::moduler::{Forsinkelse, Gain};
+use crate::moduler::{Forsinkelse, Gain, Inngangstrinn, Kanalmodus};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -86,8 +86,51 @@ pub struct Kanal {
     solo: bool,
     pan: f32,
     var_aapen: bool,
-    /// Siste toppnivå (venstre, høyre) etter fader, lineært. Til nivåmålerne.
-    maaler: [f32; 2],
+    /// Inngangstrinn (modus, fase, lavkutt) – ett per lydvei, så filtrene har egen tilstand.
+    inn_send: Inngangstrinn,
+    inn_lytt: Inngangstrinn,
+    /// ON/OFF-knappen, som på en radiokonsoll.
+    paa: bool,
+    /// Start/stopp spilleren når kanalen slås på/av eller faderen skyves opp/ned.
+    faderstart: bool,
+    var_oppe: bool,
+    /// Hvor lenge kanalen har stått på (samples) – til ON-tidtakeren.
+    paa_samples: u64,
+    maal: Maalertilstand,
+}
+
+/// Målertilstand per kanal og for master.
+#[derive(Clone, Debug, Default)]
+struct Maalertilstand {
+    /// Toppnivå siste periode (lineært), etter fader.
+    topp: [f32; 2],
+    /// Glidende kvadrert snitt (RMS, 300 ms), etter fader.
+    rms2: [f32; 2],
+    /// Toppnivå før fader (etter trim) – til å stille inngangsnivået.
+    inn_topp: f32,
+    /// Antall samples som har klippet siden start (vises til den nullstilles).
+    klipp: u32,
+}
+
+impl Maalertilstand {
+    /// Tidskonstant for RMS-måleren (300 ms, som en VU-måler).
+    fn rms_faktor() -> f32 {
+        1.0 - (-1.0 / (0.3 * SAMPLERATE as f32)).exp()
+    }
+
+    fn maaling(&self, id: &str, paa_sek: f32, aapen: bool, paa: bool) -> KanalMaaling {
+        use crate::lyd::lin_til_db;
+        KanalMaaling {
+            id: id.to_string(),
+            topp: [lin_til_db(self.topp[0]), lin_til_db(self.topp[1])],
+            rms: [lin_til_db(self.rms2[0].sqrt()), lin_til_db(self.rms2[1].sqrt())],
+            inn_topp: lin_til_db(self.inn_topp),
+            klipp: self.klipp,
+            paa_sek,
+            aapen,
+            paa,
+        }
+    }
 }
 
 impl Kanal {
@@ -96,7 +139,9 @@ impl Kanal {
         if oppsett.privat {
             oppsett.til_master = false;
         }
-        let start_db = if oppsett.kanaltype == Kanaltype::Mikrofon { f32::NEG_INFINITY } else { 0.0 };
+        // Som på en radiokonsoll: faderen står på 0 dB, og mikrofoner starter AV.
+        let start_db = 0.0;
+        let paa = oppsett.kanaltype != Kanaltype::Mikrofon;
         Kanal {
             oppsett,
             trim: Gain::ny(0.0),
@@ -105,13 +150,24 @@ impl Kanal {
             lytt_kjede: Vec::new(),
             kompensasjon: Forsinkelse::ny(0),
             fader_db: start_db,
-            fader: Glatter::ny(db_til_lin(start_db), 10.0),
+            fader: Glatter::ny(if paa { db_til_lin(start_db) } else { 0.0 }, 10.0),
             mute: false,
             solo: false,
             pan: 0.0,
             var_aapen: false,
-            maaler: [0.0; 2],
+            inn_send: Inngangstrinn::default(),
+            inn_lytt: Inngangstrinn::default(),
+            paa,
+            faderstart: true,
+            var_oppe: paa,
+            paa_samples: 0,
+            maal: Maalertilstand::default(),
         }
+    }
+
+    /// Kanalen gir lyd: slått på, ikke mutet og faderen over −60 dB.
+    fn er_oppe(&self) -> bool {
+        self.paa && !self.mute && self.fader_db > -60.0
     }
 
     fn kjede_forsinkelse(&self) -> usize {
@@ -122,9 +178,9 @@ impl Kanal {
         self.lytt_kjede = self.kjede.iter().map(|m| (m.forsinkelse() == 0).then(|| m.klon())).collect();
     }
 
-    /// En mikrofon er åpen når faderen er oppe og den ikke er mutet.
+    /// En mikrofon er åpen når den er slått på, ikke mutet og faderen er oppe.
     pub fn er_aapen(&self) -> bool {
-        self.oppsett.kanaltype == Kanaltype::Mikrofon && !self.mute && self.fader_db > -100.0
+        self.oppsett.kanaltype == Kanaltype::Mikrofon && self.paa && !self.mute && self.fader_db > -100.0
     }
 
     pub fn kjede(&self) -> &[Box<dyn Modul>] {
@@ -153,6 +209,18 @@ impl Kanal {
             Kontroll::ny("til_master", "Til Master", Kontrolltype::AvPaa, Verdi::AvPaa(true)),
             Kontroll::ny("til_studio", "Til Studio", Kontrolltype::AvPaa, Verdi::AvPaa(true)),
             Kontroll::ny("til_dj_ren", "Til DJ-ren", Kontrolltype::AvPaa, Verdi::AvPaa(false)),
+            Kontroll::ny("paa", "ON/OFF", Kontrolltype::AvPaa, Verdi::AvPaa(true)),
+            Kontroll::ny("faderstart", "Fader-start", Kontrolltype::AvPaa, Verdi::AvPaa(true)),
+            Kontroll::ny("hpf", "Lavkutt", Kontrolltype::AvPaa, Verdi::AvPaa(false)),
+            Kontroll::ny("hpf_hz", "Lavkutt-frekvens", Kontrolltype::Dreieknapp { min: 20.0, maks: 400.0, enhet: "Hz".into() }, Verdi::Tall(80.0)),
+            Kontroll::ny("fase", "Fasevending", Kontrolltype::AvPaa, Verdi::AvPaa(false)),
+            Kontroll::ny(
+                "modus",
+                "Kanalmodus",
+                Kontrolltype::Valg { valg: ["Stereo", "Mono", "Venstre", "Høyre", "Bytt V/H"].iter().map(|s| s.to_string()).collect() },
+                Verdi::Valg(0),
+            ),
+            Kontroll::ny("nullstill_klipp", "Nullstill klippvarsel", Kontrolltype::Utloser, Verdi::AvPaa(false)),
         ]
     }
 
@@ -182,11 +250,56 @@ impl Kanal {
             }
             "til_studio" => self.oppsett.til_studio = verdi.som_bool().ok_or_else(feil)?,
             "til_dj_ren" => self.oppsett.til_dj_ren = verdi.som_bool().ok_or_else(feil)?,
+            "paa" => {
+                self.paa = verdi.som_bool().ok_or_else(feil)?;
+                if !self.paa {
+                    self.paa_samples = 0;
+                }
+            }
+            "faderstart" => self.faderstart = verdi.som_bool().ok_or_else(feil)?,
+            "hpf" => {
+                let p = verdi.som_bool().ok_or_else(feil)?;
+                self.inn_send.sett_hpf(p);
+                self.inn_lytt.sett_hpf(p);
+            }
+            "hpf_hz" => {
+                let hz = verdi.som_tall().ok_or_else(feil)?;
+                self.inn_send.sett_hpf_hz(hz);
+                self.inn_lytt.sett_hpf_hz(hz);
+            }
+            "fase" => {
+                let p = verdi.som_bool().ok_or_else(feil)?;
+                self.inn_send.fase = p;
+                self.inn_lytt.fase = p;
+            }
+            "modus" => {
+                let m = match verdi.som_tall().ok_or_else(feil)? as usize {
+                    0 => Kanalmodus::Stereo,
+                    1 => Kanalmodus::Mono,
+                    2 => Kanalmodus::Venstre,
+                    3 => Kanalmodus::Hoyre,
+                    4 => Kanalmodus::Bytt,
+                    _ => return Err(feil()),
+                };
+                self.inn_send.modus = m;
+                self.inn_lytt.modus = m;
+            }
+            "nullstill_klipp" => self.maal.klipp = 0,
             _ => return Err(Kontrollfeil::UkjentKontroll(kontroll.to_string())),
         }
-        let maal = if self.mute { 0.0 } else { db_til_lin(self.fader_db) };
+        let maal = if self.mute || !self.paa { 0.0 } else { db_til_lin(self.fader_db) };
         self.fader.sett_maal(maal);
         Ok(())
+    }
+
+    fn modus_indeks(&self) -> usize {
+        match self.inn_send.modus {
+            Kanalmodus::Stereo => 0,
+            Kanalmodus::Mono => 1,
+            Kanalmodus::Venstre => 2,
+            Kanalmodus::Hoyre => 3,
+            Kanalmodus::Bytt => 4,
+        }
     }
 
     fn hent(&self, kontroll: &str) -> Option<Verdi> {
@@ -199,6 +312,12 @@ impl Kanal {
             "til_master" => Verdi::AvPaa(self.oppsett.til_master),
             "til_studio" => Verdi::AvPaa(self.oppsett.til_studio),
             "til_dj_ren" => Verdi::AvPaa(self.oppsett.til_dj_ren),
+            "paa" => Verdi::AvPaa(self.paa),
+            "faderstart" => Verdi::AvPaa(self.faderstart),
+            "hpf" => Verdi::AvPaa(self.inn_send.hpf_paa),
+            "hpf_hz" => Verdi::Tall(self.inn_send.hpf_hz),
+            "fase" => Verdi::AvPaa(self.inn_send.fase),
+            "modus" => Verdi::Valg(self.modus_indeks()),
             _ => return None,
         })
     }
@@ -223,11 +342,58 @@ impl Utganger {
     }
 }
 
-/// Nivåmålernes verdier (dBFS) etter siste prosesserte blokk.
+/// Målinger for én kanal (eller master). Alle nivåer i dBFS; −∞ = stillhet.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct KanalMaaling {
+    pub id: String,
+    /// Toppnivå (venstre, høyre) etter fader.
+    pub topp: [f32; 2],
+    /// RMS/VU (300 ms) etter fader.
+    pub rms: [f32; 2],
+    /// Toppnivå før fader, til å stille trim/gain.
+    pub inn_topp: f32,
+    /// Antall klippede samples siden sist nullstilt.
+    pub klipp: u32,
+    /// Sekunder siden kanalen ble slått på.
+    pub paa_sek: f32,
+    /// Mikrofonen er åpen (ON AIR).
+    pub aapen: bool,
+    pub paa: bool,
+}
+
+impl KanalMaaling {
+    /// Slår sammen to målinger: høyeste nivå vinner (til målere som leses sjeldnere enn lyden går).
+    pub fn slaa_sammen(&mut self, ny: &KanalMaaling) {
+        for i in 0..2 {
+            self.topp[i] = self.topp[i].max(ny.topp[i]);
+            self.rms[i] = self.rms[i].max(ny.rms[i]);
+        }
+        self.inn_topp = self.inn_topp.max(ny.inn_topp);
+        self.klipp = ny.klipp;
+        self.paa_sek = ny.paa_sek;
+        self.aapen = ny.aapen;
+        self.paa = ny.paa;
+    }
+}
+
+/// Nivåmålernes verdier etter siste prosesserte blokk.
 #[derive(Clone, Debug, Serialize)]
 pub struct Nivaamaalere {
-    pub kanaler: Vec<(String, f32, f32)>,
-    pub master: (f32, f32),
+    pub kanaler: Vec<KanalMaaling>,
+    pub master: KanalMaaling,
+}
+
+impl Nivaamaalere {
+    pub fn slaa_sammen(&mut self, ny: &Nivaamaalere) {
+        if self.kanaler.len() != ny.kanaler.len() || self.kanaler.iter().zip(&ny.kanaler).any(|(a, b)| a.id != b.id) {
+            *self = ny.clone();
+            return;
+        }
+        for (a, b) in self.kanaler.iter_mut().zip(&ny.kanaler) {
+            a.slaa_sammen(b);
+        }
+        self.master.slaa_sammen(&ny.master);
+    }
 }
 
 /// Innstillinger for monitorkutt.
@@ -258,7 +424,7 @@ pub struct Motor {
     hold_igjen: usize,
     var_on_air: bool,
     hendelser: Hendelsesbuss,
-    master_maaler: [f32; 2],
+    master_maal: Maalertilstand,
 }
 
 impl Default for Motor {
@@ -279,7 +445,7 @@ impl Motor {
             hold_igjen: 0,
             var_on_air: false,
             hendelser: Hendelsesbuss::default(),
-            master_maaler: [0.0; 2],
+            master_maal: Maalertilstand::default(),
         }
     }
 
@@ -398,7 +564,20 @@ impl Motor {
             }
             ["kanal", id, kontroll] => {
                 let k = self.kanaler.iter_mut().find(|k| k.oppsett.id == *id).ok_or_else(ukjent)?;
-                k.sett(kontroll, verdi)
+                let r = k.sett(kontroll, verdi);
+                let oppe = k.er_oppe();
+                if oppe != k.var_oppe {
+                    k.var_oppe = oppe;
+                    if k.faderstart {
+                        let kanal = k.oppsett.id.clone();
+                        self.hendelser.send(if oppe { Hendelse::FaderStart { kanal } } else { Hendelse::FaderStopp { kanal } });
+                    }
+                }
+                r
+            }
+            ["master", "nullstill_klipp"] => {
+                self.nullstill_master_klipp();
+                Ok(())
             }
             ["master", "fader"] => {
                 self.master_db = verdi.som_tall().ok_or_else(ukjent)?.min(10.0);
@@ -443,16 +622,21 @@ impl Motor {
         }
     }
 
-    /// Nivåmålere: toppnivå i dBFS (venstre, høyre) per kanal etter fader, og master.
+    /// Nivåmålere per kanal og for master.
     pub fn nivaamaalere(&self) -> Nivaamaalere {
         Nivaamaalere {
             kanaler: self
                 .kanaler
                 .iter()
-                .map(|k| (k.oppsett.id.clone(), crate::lyd::lin_til_db(k.maaler[0]), crate::lyd::lin_til_db(k.maaler[1])))
+                .map(|k| k.maal.maaling(&k.oppsett.id, k.paa_samples as f32 / SAMPLERATE as f32, k.er_aapen(), k.paa))
                 .collect(),
-            master: (crate::lyd::lin_til_db(self.master_maaler[0]), crate::lyd::lin_til_db(self.master_maaler[1])),
+            master: self.master_maal.maaling("master", 0.0, false, true),
         }
+    }
+
+    /// Nullstiller klippvarselet på master.
+    pub fn nullstill_master_klipp(&mut self) {
+        self.master_maal.klipp = 0;
     }
 
     pub fn hendelser(&mut self) -> Vec<Hendelse> {
@@ -513,8 +697,9 @@ impl Motor {
                 dj_ren.legg_til(inn, 1.0);
             }
 
-            // Sendeveien: trim → hele kjeden → forsinkelseskompensasjon.
-            k.trim.prosesser(inn, &mut a);
+            // Sendeveien: inngangstrinn → trim → hele kjeden → forsinkelseskompensasjon.
+            k.inn_send.prosesser(inn, &mut b);
+            k.trim.prosesser(&b, &mut a);
             for m in &mut k.kjede {
                 m.prosesser(&a, &mut b);
                 std::mem::swap(&mut a, &mut b);
@@ -522,8 +707,9 @@ impl Motor {
             k.kompensasjon.prosesser(&a, &mut b);
             std::mem::swap(&mut a, &mut b);
 
-            // Lytteveien: trim → kjeden uten moduler med forsinkelse.
-            k.trim_lytt.prosesser(inn, &mut l);
+            // Lytteveien: inngangstrinn → trim → kjeden uten moduler med forsinkelse.
+            k.inn_lytt.prosesser(inn, &mut l2);
+            k.trim_lytt.prosesser(&l2, &mut l);
             for m in k.lytt_kjede.iter_mut().flatten() {
                 m.prosesser(&l, &mut l2);
                 std::mem::swap(&mut l, &mut l2);
@@ -541,10 +727,19 @@ impl Motor {
 
             let til_master = k.oppsett.til_master && !k.oppsett.privat;
             let mut topp = [0.0f32; 2];
+            let rf = Maalertilstand::rms_faktor();
             for i in 0..len {
                 let g = fader_buf[i];
-                topp[0] = topp[0].max((l.v[i] * g * pv).abs());
-                topp[1] = topp[1].max((l.h[i] * g * ph).abs());
+                let (sv, sh) = (l.v[i] * g * pv, l.h[i] * g * ph);
+                topp[0] = topp[0].max(sv.abs());
+                topp[1] = topp[1].max(sh.abs());
+                k.maal.rms2[0] += (sv * sv - k.maal.rms2[0]) * rf;
+                k.maal.rms2[1] += (sh * sh - k.maal.rms2[1]) * rf;
+                let inn_abs = l.v[i].abs().max(l.h[i].abs());
+                k.maal.inn_topp = k.maal.inn_topp.max(inn_abs);
+                if inn_abs >= 0.999 {
+                    k.maal.klipp = k.maal.klipp.saturating_add(1);
+                }
                 if til_master {
                     master.v[i] += a.v[i] * g * pv;
                     master.h[i] += a.h[i] * g * ph;
@@ -555,7 +750,10 @@ impl Motor {
                 }
             }
 
-            k.maaler = topp;
+            k.maal.topp = topp;
+            if k.paa && !k.mute {
+                k.paa_samples += len as u64;
+            }
 
             let aapen = k.er_aapen();
             if aapen != k.var_aapen {
@@ -606,11 +804,23 @@ impl Motor {
             hoyttalere.h[i] = studio.h[i] * gs * kutt;
         }
 
-        self.master_maaler = [
-            p.v.iter().fold(0.0f32, |m, x| m.max(x.abs())),
-            p.h.iter().fold(0.0f32, |m, x| m.max(x.abs())),
-        ];
-        if crate::maaling::klipp(&p.v) + crate::maaling::klipp(&p.h) > 0 {
+        let rf = Maalertilstand::rms_faktor();
+        let mut mt = [0.0f32; 2];
+        let mut mk = 0u32;
+        for i in 0..len {
+            let (v, h) = (p.v[i], p.h[i]);
+            mt[0] = mt[0].max(v.abs());
+            mt[1] = mt[1].max(h.abs());
+            self.master_maal.rms2[0] += (v * v - self.master_maal.rms2[0]) * rf;
+            self.master_maal.rms2[1] += (h * h - self.master_maal.rms2[1]) * rf;
+            if v.abs() >= 0.999 || h.abs() >= 0.999 {
+                mk += 1;
+            }
+        }
+        self.master_maal.topp = mt;
+        self.master_maal.inn_topp = mt[0].max(mt[1]);
+        if mk > 0 {
+            self.master_maal.klipp = self.master_maal.klipp.saturating_add(mk);
             self.hendelser.send(Hendelse::Klipping { sted: "Master".into() });
         }
 
@@ -635,7 +845,13 @@ impl Motor {
                 solo: k.solo,
                 pan: k.pan,
                 var_aapen: k.var_aapen,
-                maaler: [0.0; 2],
+                inn_send: k.inn_send.clone(),
+                inn_lytt: k.inn_lytt.clone(),
+                paa: k.paa,
+                faderstart: k.faderstart,
+                var_oppe: k.var_oppe,
+                paa_samples: 0,
+                maal: Maalertilstand::default(),
             })
             .collect();
         let mut m = Motor {
@@ -648,7 +864,7 @@ impl Motor {
             hold_igjen: 0,
             var_on_air: false,
             hendelser: Hendelsesbuss::default(),
-            master_maaler: [0.0; 2],
+            master_maal: Maalertilstand::default(),
         };
         m.nullstill();
         m
@@ -659,6 +875,8 @@ impl Motor {
         for k in &mut self.kanaler {
             k.trim.nullstill();
             k.trim_lytt.nullstill();
+            k.inn_send.nullstill();
+            k.inn_lytt.nullstill();
             k.kjede.iter_mut().for_each(|m| m.nullstill());
             k.lytt_kjede.iter_mut().flatten().for_each(|m| m.nullstill());
             k.kompensasjon.nullstill();
@@ -736,8 +954,9 @@ mod tester {
         let inn = innganger(&[("musikk", tone.clone())]);
         let ut = m.prosesser(&inn);
         assert!(maaling::rms_dbfs(&ut.hoyttalere.v[12_000..]) > -22.0);
+        assert!(!m.er_on_air(), "mikrofonen starter AV, selv med faderen på 0 dB");
 
-        m.sett("kanal/mik1/fader", Verdi::Tall(0.0)).unwrap();
+        m.sett("kanal/mik1/paa", Verdi::AvPaa(true)).unwrap();
         let ut = m.prosesser(&inn);
         assert!(m.er_on_air());
         let h = m.hendelser();
@@ -747,7 +966,7 @@ mod tester {
         assert!(maaling::rms_dbfs(&ut.hodetelefoner.v[12_000..]) > -22.0, "hodetelefonene skal ikke kuttes");
 
         // Holdetid: like etter at mikrofonen lukkes er høyttalerne fortsatt kuttet.
-        m.sett("kanal/mik1/fader", Verdi::Tall(f32::NEG_INFINITY)).unwrap();
+        m.sett("kanal/mik1/paa", Verdi::AvPaa(false)).unwrap();
         let kort = innganger(&[("musikk", testlyd::tone(1000.0, -18.0, 0.1))]);
         let ut = m.prosesser(&kort);
         assert!(maaling::rms_dbfs(&ut.hoyttalere.v) < -60.0, "holdetid skal holde kuttet");
@@ -803,10 +1022,83 @@ mod tester {
             m.prosesser(&innganger(&[("a", testlyd::tone(1000.0, -18.0, 0.1))]));
         }
         let n = m.nivaamaalere();
-        let a = n.kanaler.iter().find(|k| k.0 == "a").unwrap();
-        let b = n.kanaler.iter().find(|k| k.0 == "b").unwrap();
-        assert!((a.1 - -24.0).abs() < 0.2, "kanal a viste {}", a.1);
-        assert_eq!(b.1, f32::NEG_INFINITY);
-        assert!((n.master.0 - -24.0).abs() < 0.2, "master viste {}", n.master.0);
+        let a = n.kanaler.iter().find(|k| k.id == "a").unwrap();
+        let b = n.kanaler.iter().find(|k| k.id == "b").unwrap();
+        assert!((a.topp[0] - -24.0).abs() < 0.2, "kanal a viste {}", a.topp[0]);
+        // Sinus: RMS ligger 3 dB under toppen.
+        assert!((a.rms[0] - -27.0).abs() < 0.3, "RMS viste {}", a.rms[0]);
+        assert!((a.inn_topp - -18.0).abs() < 0.2, "før fader viste {}", a.inn_topp);
+        assert_eq!(b.topp[0], f32::NEG_INFINITY);
+        assert!((n.master.topp[0] - -24.0).abs() < 0.2, "master viste {}", n.master.topp[0]);
+        assert_eq!(n.master.klipp, 0);
+    }
+
+    #[test]
+    fn on_knapp_gir_fader_start_og_tidtaker() {
+        let mut m = Motor::ny();
+        m.legg_til_kanal(KanalOppsett::ny("a", "Spiller A", Kanaltype::Spiller)).unwrap();
+        m.hendelser();
+        m.sett("kanal/a/paa", Verdi::AvPaa(false)).unwrap();
+        assert!(m.hendelser().contains(&Hendelse::FaderStopp { kanal: "a".into() }));
+        m.sett("kanal/a/paa", Verdi::AvPaa(true)).unwrap();
+        assert!(m.hendelser().contains(&Hendelse::FaderStart { kanal: "a".into() }));
+        // Fader ned og opp gir også stopp/start.
+        m.sett("kanal/a/fader", Verdi::Tall(-200.0)).unwrap();
+        assert!(m.hendelser().contains(&Hendelse::FaderStopp { kanal: "a".into() }));
+        m.sett("kanal/a/fader", Verdi::Tall(-3.0)).unwrap();
+        assert!(m.hendelser().contains(&Hendelse::FaderStart { kanal: "a".into() }));
+        // Små fader-bevegelser oppe gir ingen nye hendelser.
+        m.sett("kanal/a/fader", Verdi::Tall(-2.0)).unwrap();
+        assert!(!m.hendelser().iter().any(|h| matches!(h, Hendelse::FaderStart { .. } | Hendelse::FaderStopp { .. })));
+        // Fader-start av: ingen hendelser.
+        m.sett("kanal/a/faderstart", Verdi::AvPaa(false)).unwrap();
+        m.sett("kanal/a/paa", Verdi::AvPaa(false)).unwrap();
+        assert!(!m.hendelser().iter().any(|h| matches!(h, Hendelse::FaderStopp { .. })));
+        // Tidtaker
+        m.sett("kanal/a/paa", Verdi::AvPaa(true)).unwrap();
+        m.prosesser(&innganger(&[("a", testlyd::stillhet(1.5))]));
+        let t = m.nivaamaalere().kanaler[0].paa_sek;
+        assert!((t - 1.5).abs() < 0.01, "tidtaker {t}");
+        m.sett("kanal/a/paa", Verdi::AvPaa(false)).unwrap();
+        assert_eq!(m.nivaamaalere().kanaler[0].paa_sek, 0.0);
+    }
+
+    #[test]
+    fn av_kanal_gir_ingen_lyd_men_cue_virker() {
+        let mut m = Motor::ny();
+        m.legg_til_kanal(KanalOppsett::ny("a", "A", Kanaltype::LinjeStereo)).unwrap();
+        m.sett("kanal/a/paa", Verdi::AvPaa(false)).unwrap();
+        m.sett("kanal/a/solo", Verdi::AvPaa(true)).unwrap();
+        let ut = m.prosesser(&innganger(&[("a", testlyd::tone(1000.0, -18.0, 0.3))]));
+        assert!(maaling::topp_dbfs(&ut.program.v[4800..]) < -100.0, "av = ikke på lufta");
+        assert!(maaling::topp_dbfs(&ut.hodetelefoner.v[4800..]) > -18.5, "men du kan forhåndslytte");
+    }
+
+    #[test]
+    fn klippvarsel_blir_staaende_til_det_nullstilles() {
+        let mut m = Motor::ny();
+        m.legg_til_kanal(KanalOppsett::ny("a", "A", Kanaltype::LinjeStereo)).unwrap();
+        m.prosesser(&innganger(&[("a", testlyd::tone(1000.0, 0.0, 0.1))]));
+        m.prosesser(&innganger(&[("a", testlyd::stillhet(0.5))]));
+        let n = m.nivaamaalere();
+        assert!(n.kanaler[0].klipp > 0);
+        assert!(n.master.klipp > 0);
+        m.sett("kanal/a/nullstill_klipp", Verdi::AvPaa(true)).unwrap();
+        m.sett("master/nullstill_klipp", Verdi::AvPaa(true)).unwrap();
+        let n = m.nivaamaalere();
+        assert_eq!((n.kanaler[0].klipp, n.master.klipp), (0, 0));
+    }
+
+    #[test]
+    fn inngangstrinn_ligger_i_begge_lydveier() {
+        let mut m = Motor::ny();
+        m.legg_til_kanal(KanalOppsett::ny("a", "A", Kanaltype::LinjeStereo)).unwrap();
+        m.sett("kanal/a/fase", Verdi::AvPaa(true)).unwrap();
+        m.sett("kanal/a/modus", Verdi::Tall(2.0)).unwrap(); // bare venstre
+        let inn = Blokk { v: vec![0.5; 256], h: vec![0.1; 256] };
+        let ut = m.prosesser(&innganger(&[("a", inn)]));
+        assert_eq!((ut.program.v[100], ut.program.h[100]), (-0.5, -0.5));
+        assert_eq!((ut.hodetelefoner.v[100], ut.hodetelefoner.h[100]), (-0.5, -0.5));
+        assert_eq!(m.hent("kanal/a/modus"), Some(Verdi::Valg(2)));
     }
 }
